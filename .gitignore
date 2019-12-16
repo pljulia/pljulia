@@ -2,3 +2,5 @@
 *.so
 *.sw?
 *.bc
+
+/results
