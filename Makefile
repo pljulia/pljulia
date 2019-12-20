@@ -6,16 +6,21 @@
 
 PGFILEDESC = "PL/Julia - procedural language"
 
+JL_SHARE = $(shell julia -e 'print(joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia"))')
+PG_CPPFLAGS += $(shell $(JL_SHARE)/julia-config.jl --cflags)
+PG_LDFLAGS += $(shell $(JL_SHARE)/julia-config.jl --ldflags)
+SHLIB_LINK += $(shell $(JL_SHARE)/julia-config.jl --ldlibs)
+
 REGRESS = create
 
 EXTENSION = pljulia
-EXTVERSION = 0.1
+EXTVERSION = 0.2
 
 MODULE_big = pljulia
 
 OBJS = pljulia.o
 
-DATA = pljulia.control pljulia--0.1.sql
+DATA = pljulia.control pljulia--0.2.sql
 
 pljulia.o: pljulia.c
 
