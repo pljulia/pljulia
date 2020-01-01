@@ -26,6 +26,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pljulia_call_handler);
 
+char *pljulia_compile(FunctionCallInfo);
 void pljulia_execute(FunctionCallInfo);
 
 /*
@@ -50,18 +51,31 @@ pljulia_call_handler(PG_FUNCTION_ARGS)
 }
 
 /*
- * Retrieve the Julia code and execute it.
+ * Retrieve Julia code and reconstruct it with parameter inputs as Julia global
+ * variables.
  */
-void
-pljulia_execute(FunctionCallInfo fcinfo)
+char *
+pljulia_compile(FunctionCallInfo fcinfo)
 {
 	HeapTuple procedure_tuple;
 	Form_pg_proc procedure_struct;
 	Datum procedure_source_datum;
 	const char *procedure_code;
 	bool isnull;
+	volatile MemoryContext proc_cxt = NULL;
 
-	jl_value_t *ret;
+	int compiled_len = 0;
+	char *compiled_code;
+
+	int i;
+	FmgrInfo *arg_out_func;
+	Form_pg_type type_struct;
+	HeapTuple type_tuple;
+
+	Oid *argtypes;
+	char **argnames;
+	char *argmodes;
+	char *value;
 
 	procedure_tuple = SearchSysCache(PROCOID,
 			ObjectIdGetDatum(fcinfo->flinfo->fn_oid), 0, 0, 0);
@@ -79,7 +93,78 @@ pljulia_execute(FunctionCallInfo fcinfo)
 			procedure_source_datum));
 	elog(DEBUG1, "procedure code:\n%s", procedure_code);
 
-	ret = jl_eval_string(procedure_code);
+	/*
+	 * Add the final carriage return to the length of the original
+	 * procedure.
+	 */
+	compiled_len += strlen(procedure_code) + 1;
+
+	arg_out_func = (FmgrInfo *) palloc0(fcinfo->nargs * sizeof(FmgrInfo));
+
+	proc_cxt = AllocSetContextCreate(TopMemoryContext,
+			"PL/Julia function", 0, (1 * 1024), (8 * 1024));
+
+	get_func_arg_info(procedure_tuple, &argtypes, &argnames, &argmodes);
+
+	elog(DEBUG1, "nargs %d", fcinfo->nargs);
+
+	/*
+	 * Loop through the parameters to determine how big of a buffer is needed
+	 * for prepending the parameters as global variables to the
+	 * function/procedure code.
+	 */
+	for (i = 0; i < fcinfo->nargs; i ++)
+	{
+		Oid argtype = procedure_struct->proargtypes.values[i];
+		type_tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(argtype));
+		if (!HeapTupleIsValid(type_tuple))
+			elog(ERROR, "cache lookup failed for type %u", argtype);
+
+		type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
+		fmgr_info_cxt(type_struct->typoutput, &(arg_out_func[i]), proc_cxt);
+
+		value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
+
+		elog(DEBUG1, "[%d] %s = %s", i, argnames[i], value);
+
+		/* Factor in length of an equal sign (=) and a line break (\n). */
+		compiled_len += strlen(argnames[i]) + strlen(value) + 2;
+	}
+	elog(DEBUG1, "compiled_len = %d", compiled_len);
+
+	compiled_code = (char *) palloc0(compiled_len * sizeof(char));
+
+	/*
+	 * Prepend the procedure code with the input parameters as global
+	 * variables.
+	 */
+	compiled_code[0] = '\0';
+	for (i = 0; i < fcinfo->nargs; i ++)
+	{
+		strcat(compiled_code, argnames[i]);
+		strcat(compiled_code, "=");
+		value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
+		strcat(compiled_code, value);
+		strcat(compiled_code, "\n");
+	}
+	strcat(compiled_code, procedure_code);
+	elog(DEBUG1, "compiled code (%ld)\n%s", strlen(compiled_code),
+			compiled_code);
+
+	return compiled_code;
+}
+
+/*
+ * Execute Julia code.
+ */
+void
+pljulia_execute(FunctionCallInfo fcinfo)
+{
+	jl_value_t *ret;
+
+	char *code = pljulia_compile(fcinfo);
+
+	ret = jl_eval_string(code);
 	if (jl_exception_occurred())
 		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 

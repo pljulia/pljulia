@@ -1,5 +1,5 @@
 comment = 'PL/Julia procedural language'
-default_version = '0.3'
+default_version = '0.4'
 module_pathname = '$libdir/pljulia'
 relocatable = false
 schema = pg_catalog
