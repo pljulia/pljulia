@@ -21,6 +21,7 @@
 #include <julia.h>
 
 #define DOUBLE_LEN 316
+#define LONG_INT_LEN 20
 
 MemoryContext TopMemoryContext = NULL;
 
@@ -206,10 +207,18 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	if (jl_typeis(ret, jl_float64_type))
 	{
 		double ret_unboxed = jl_unbox_float64(ret);
-		elog(DEBUG1, "ret (float64): %f", ret_unboxed);
+		elog(DEBUG1, "ret (float64): %f", jl_unbox_float64(ret));
 
 		buffer = (char *) palloc0((DOUBLE_LEN + 1) * sizeof(char));
 		snprintf(buffer, DOUBLE_LEN, "%f", ret_unboxed);
+	}
+	else if (jl_typeis(ret, jl_int64_type))
+	{
+		long int ret_unboxed = jl_unbox_int64(ret);
+		elog(DEBUG1, "ret (int64): %ld", jl_unbox_int64(ret));
+
+		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
+		snprintf(buffer, LONG_INT_LEN, "%ld", ret_unboxed);
 	}
 	else
 	{
