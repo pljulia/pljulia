@@ -14,13 +14,13 @@ SHLIB_LINK += $(shell $(JL_SHARE)/julia-config.jl --ldlibs)
 REGRESS = create
 
 EXTENSION = pljulia
-EXTVERSION = 0.6
+EXTVERSION = 0.7
 
 MODULE_big = pljulia
 
 OBJS = pljulia.o
 
-DATA = pljulia.control pljulia--0.6.sql
+DATA = pljulia.control pljulia--0.7.sql
 
 pljulia.o: pljulia.c
 

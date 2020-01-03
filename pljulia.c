@@ -30,6 +30,7 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(pljulia_call_handler);
 
 static Datum cstring_to_type(char *, Oid);
+static Datum jl_value_t_to_datum(FunctionCallInfo, jl_value_t *, Oid);
 char *pljulia_compile(FunctionCallInfo, HeapTuple, Form_pg_proc);
 static Datum pljulia_execute(FunctionCallInfo);
 
@@ -56,6 +57,40 @@ cstring_to_type(char * input, Oid typeoid)
 	ReleaseSysCache(typetuple);
 
 	PG_RETURN_DATUM(ret);
+}
+
+/*
+ * Convert the Julia result to a Datum of type "typeoid".
+ */
+static Datum
+jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
+{
+	char *buffer;
+
+	if (jl_typeis(ret, jl_float64_type))
+	{
+		double ret_unboxed = jl_unbox_float64(ret);
+		elog(DEBUG1, "ret (float64): %f", jl_unbox_float64(ret));
+
+		buffer = (char *) palloc0((DOUBLE_LEN + 1) * sizeof(char));
+		snprintf(buffer, DOUBLE_LEN, "%f", ret_unboxed);
+	}
+	else if (jl_typeis(ret, jl_int64_type))
+	{
+		long int ret_unboxed = jl_unbox_int64(ret);
+		elog(DEBUG1, "ret (int64): %ld", jl_unbox_int64(ret));
+
+		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
+		snprintf(buffer, LONG_INT_LEN, "%ld", ret_unboxed);
+	}
+	else
+	{
+		elog(ERROR, "ERROR: unexpected unboxed Julia return type");
+		PG_RETURN_NULL();
+	}
+	elog(DEBUG1, "ret (buffer): %s", buffer);
+
+	PG_RETURN_DATUM(cstring_to_type(buffer, prorettype));
 }
 
 /*
@@ -183,7 +218,6 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 static Datum
 pljulia_execute(FunctionCallInfo fcinfo)
 {
-	char *buffer;
 	jl_value_t *ret;
 
 	HeapTuple procedure_tuple;
@@ -204,28 +238,5 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	if (jl_exception_occurred())
 		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 
-	if (jl_typeis(ret, jl_float64_type))
-	{
-		double ret_unboxed = jl_unbox_float64(ret);
-		elog(DEBUG1, "ret (float64): %f", jl_unbox_float64(ret));
-
-		buffer = (char *) palloc0((DOUBLE_LEN + 1) * sizeof(char));
-		snprintf(buffer, DOUBLE_LEN, "%f", ret_unboxed);
-	}
-	else if (jl_typeis(ret, jl_int64_type))
-	{
-		long int ret_unboxed = jl_unbox_int64(ret);
-		elog(DEBUG1, "ret (int64): %ld", jl_unbox_int64(ret));
-
-		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
-		snprintf(buffer, LONG_INT_LEN, "%ld", ret_unboxed);
-	}
-	else
-	{
-		elog(ERROR, "ERROR: unexpected unboxed Julia return type");
-		PG_RETURN_NULL();
-	}
-	elog(DEBUG1, "ret (buffer): %s", buffer);
-
-	PG_RETURN_DATUM(cstring_to_type(buffer, procedure_struct->prorettype));
+	return jl_value_t_to_datum(fcinfo, ret, procedure_struct->prorettype);
 }
