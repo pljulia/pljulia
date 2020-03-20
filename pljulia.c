@@ -180,6 +180,7 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 
 		type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
 		fmgr_info_cxt(type_struct->typoutput, &(arg_out_func[i]), proc_cxt);
+		ReleaseSysCache(type_tuple);
 
 		value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
 
@@ -233,6 +234,8 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	procedure_struct = (Form_pg_proc) GETSTRUCT(procedure_tuple);
 
 	code = pljulia_compile(fcinfo, procedure_tuple, procedure_struct);
+
+	ReleaseSysCache(procedure_tuple);
 
 	ret = jl_eval_string(code);
 	if (jl_exception_occurred())
