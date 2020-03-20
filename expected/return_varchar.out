@@ -1,0 +1,11 @@
+CREATE FUNCTION julia_varchar()
+RETURNS VARCHAR AS $$
+    "varchar"
+$$ LANGUAGE pljulia;
+SELECT julia_varchar();
+ julia_varchar 
+---------------
+ varchar
+(1 row)
+
+DROP FUNCTION julia_varchar();

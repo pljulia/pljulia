@@ -11,8 +11,9 @@ PG_CPPFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --cflags)
 PG_LDFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --ldflags)
 SHLIB_LINK += $(shell julia $(JL_SHARE)/julia-config.jl --ldlibs)
 
-REGRESS = create return_bigint return_decimal return_double_precision \
-		return_integer return_numeric return_real return_smallint
+REGRESS = create return_bigint return_char return_decimal \
+		return_double_precision return_integer return_numeric return_real \
+		return_smallint return_text return_varchar
 
 EXTENSION = pljulia
 EXTVERSION = 0.7

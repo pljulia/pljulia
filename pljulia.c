@@ -67,7 +67,13 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
 {
 	char *buffer;
 
-	if (jl_typeis(ret, jl_float64_type))
+	if (jl_is_string(ret))
+	{
+		elog(DEBUG1, "ret (string): %s", jl_string_ptr(ret));
+		PG_RETURN_DATUM(cstring_to_type((char *) jl_string_ptr(ret),
+				prorettype));
+	}
+	else if (jl_typeis(ret, jl_float64_type))
 	{
 		double ret_unboxed = jl_unbox_float64(ret);
 		elog(DEBUG1, "ret (float64): %f", jl_unbox_float64(ret));
