@@ -1,0 +1,11 @@
+CREATE FUNCTION julia_sqrt(x INTEGER)
+RETURNS DOUBLE PRECISION AS $$
+    sqrt(x)
+$$ LANGUAGE pljulia;
+SELECT julia_sqrt(5);
+ julia_sqrt 
+------------
+   2.236068
+(1 row)
+
+DROP FUNCTION julia_sqrt(x INTEGER);

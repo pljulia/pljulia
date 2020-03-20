@@ -1,0 +1,11 @@
+CREATE FUNCTION julia_increment(x INTEGER)
+RETURNS SMALLINT AS $$
+    x + 1
+$$ LANGUAGE pljulia;
+SELECT julia_increment(9);
+ julia_increment 
+-----------------
+              10
+(1 row)
+
+DROP FUNCTION julia_increment(x INTEGER);

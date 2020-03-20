@@ -1,0 +1,11 @@
+CREATE FUNCTION julia_increment(x INTEGER)
+RETURNS INTEGER AS $$
+    x + 1
+$$ LANGUAGE pljulia;
+SELECT julia_increment(4);
+ julia_increment 
+-----------------
+               5
+(1 row)
+
+DROP FUNCTION julia_increment(x INTEGER);

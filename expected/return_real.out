@@ -1,0 +1,11 @@
+CREATE FUNCTION julia_sqrt(x INTEGER)
+RETURNS REAL AS $$
+    sqrt(x)
+$$ LANGUAGE pljulia;
+SELECT julia_sqrt(6);
+ julia_sqrt 
+------------
+    2.44949
+(1 row)
+
+DROP FUNCTION julia_sqrt(x INTEGER);
