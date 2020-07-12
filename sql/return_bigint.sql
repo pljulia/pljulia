@@ -1,6 +1,6 @@
 CREATE FUNCTION julia_increment(x INTEGER)
-RETURNS SMALLINT AS $$
+RETURNS BIGINT AS $$
     x + 1
 $$ LANGUAGE pljulia;
-SELECT julia_increment(9);
+SELECT julia_increment(99999);
 DROP FUNCTION julia_increment(x INTEGER);
