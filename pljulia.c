@@ -165,8 +165,8 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 
 	arg_out_func = (FmgrInfo *) palloc0(fcinfo->nargs * sizeof(FmgrInfo));
 
-	proc_cxt = AllocSetContextCreate(TopMemoryContext,
-			"PL/Julia function", 0, (1 * 1024), (8 * 1024));
+	proc_cxt = AllocSetContextCreate(TopMemoryContext, "PL/Julia function",
+			ALLOCSET_SMALL_SIZES);
 
 	get_func_arg_info(procedure_tuple, &argtypes, &argnames, &argmodes);
 
