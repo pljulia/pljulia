@@ -190,7 +190,7 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 
 		value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
 
-		elog(DEBUG1, "[%d] %s = %s", i, argnames[i], value);
+		elog(DEBUG1, "[%d] %s = %s :: %u", i, argnames[i], value, argtypes[i]);
 
 		/* Factor in length of an equal sign (=) and a line break (\n). */
 		compiled_len += strlen(argnames[i]) + strlen(value) + 2;
@@ -209,6 +209,15 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		strcat(compiled_code, argnames[i]);
 		strcat(compiled_code, "=");
 		value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
+
+		/* Rewrite SQL arrays to Julia arrays on the fly. */
+		if (argtypes[i] == INT4ARRAYOID)
+		{
+			int j = strlen(value) - 1;
+			value[0] = '[';
+			value[j] = ']';
+		}
+
 		strcat(compiled_code, value);
 		strcat(compiled_code, "\n");
 	}
