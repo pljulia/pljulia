@@ -3,4 +3,6 @@
 *.sw?
 *.bc
 
+tags
+
 /results
