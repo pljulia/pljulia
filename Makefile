@@ -12,6 +12,7 @@ PGFILEDESC = "PL/Julia - procedural language"
 
 JL_SHARE = $(shell julia -e 'print(joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia"))')
 PG_CFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --cflags)
+PG_CPPFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --cflags)
 PG_LDFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --ldflags)
 PG_LDFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --ldlibs)
 
