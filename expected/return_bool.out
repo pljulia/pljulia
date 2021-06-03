@@ -1,0 +1,11 @@
+CREATE FUNCTION julia_compare(x INTEGER, y INTEGER)
+RETURNS BOOLEAN AS $$
+    x > y
+$$ LANGUAGE pljulia;
+SELECT julia_compare(4,3);
+ julia_compare 
+---------------
+ t
+(1 row)
+
+DROP FUNCTION julia_compare(x INTEGER, y INTEGER);

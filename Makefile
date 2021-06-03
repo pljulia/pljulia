@@ -18,7 +18,7 @@ PG_LDFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --ldlibs)
 
 REGRESS = create in_array_integer return_bigint return_char return_decimal \
 		return_double_precision return_integer return_numeric return_real \
-		return_smallint return_text return_varchar
+		return_smallint return_text return_varchar return_bool
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

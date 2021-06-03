@@ -89,6 +89,14 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
 		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
 		snprintf(buffer, LONG_INT_LEN, "%ld", ret_unboxed);
 	}
+	else if (jl_typeis(ret, jl_bool_type))
+	{
+		int ret_unboxed  = jl_unbox_bool(ret);
+		elog(DEBUG1, "ret (bool): %d", jl_unbox_bool(ret));
+
+		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
+		snprintf(buffer, LONG_INT_LEN, "%d", ret_unboxed);
+	}
 	else
 	{
 		elog(ERROR, "ERROR: unexpected unboxed Julia return type");
