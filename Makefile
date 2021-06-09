@@ -4,11 +4,12 @@
 #
 #-------------------------------------------------------------------------
 
-MODULES = pljulia
+MODULE_big = pljulia
 
 EXTENSION = pljulia
 DATA = pljulia.control pljulia--0.8.sql
 PGFILEDESC = "PL/Julia - procedural language"
+OBJS = pljulia.o convert_args.o
 
 JL_SHARE = $(shell julia -e 'print(joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia"))')
 PG_CFLAGS += $(shell julia $(JL_SHARE)/julia-config.jl --cflags)
