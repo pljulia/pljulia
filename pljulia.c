@@ -33,12 +33,18 @@ typedef struct pljulia_proc_desc
 	/* the name given by the user upon function definition */
 	char *user_proname;
 	char *internal_proname; /* Julia name (based on function OID) */
-	/* context holding this procedure and its subsidiaries */
+	/*
+	 * context holding this procedure and its subsidiaries analogous to
+	 * plpython
+	 */
 	MemoryContext mcxt;
-	Oid result_typid; /* OID of fn's result type */
-	int nargs; /* number of arguments */
+	Oid result_typid;       /* OID of fn's result type */
+	int nargs;              /* number of arguments */
 	TransactionId fn_xmin;
 	char *function_body;
+	FmgrInfo *arg_out_func; /* output fns for arg types, kept to convert from datum to cstring */
+	Oid *arg_arraytype;     /* InvalidOid if not an array */
+
 } pljulia_proc_desc;
 
 /* The procedure hash key */
@@ -71,8 +77,10 @@ static Datum cstring_to_type(char *, Oid);
 static Datum jl_value_t_to_datum(FunctionCallInfo, jl_value_t *, Oid);
 pljulia_proc_desc *pljulia_compile(FunctionCallInfo, HeapTuple, Form_pg_proc);
 static Datum pljulia_execute(FunctionCallInfo);
-void julia_setup_input_args(FunctionCallInfo, HeapTuple, Form_pg_proc,
-		jl_value_t **, MemoryContext);
+void julia_setup_input_args(FunctionCallInfo, HeapTuple, Form_pg_proc, jl_value_t **,
+                            pljulia_proc_desc *);
+jl_value_t *convert_arg_to_julia(Datum, Oid, pljulia_proc_desc *, int);
+jl_value_t *julia_array_from_datum(Datum, Oid);
 void _PG_init(void);
 
 void
@@ -171,37 +179,148 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
 void
 julia_setup_input_args(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		Form_pg_proc procedure_struct, jl_value_t **boxed_args,
-		MemoryContext proc_cxt)
+		pljulia_proc_desc *prodesc)
 {
 	Oid *argtypes;
 	char **argnames;
 	char *argmodes;
 	char *value;
 	int i;
-	FmgrInfo *arg_out_func;
 	Form_pg_type type_struct;
 	HeapTuple type_tuple;
+	MemoryContext proc_cxt;
+	bool is_array_type;
 
 	get_func_arg_info(procedure_tuple, &argtypes, &argnames, &argmodes);
-	arg_out_func = (FmgrInfo *) palloc0(fcinfo->nargs * sizeof(FmgrInfo));
+	proc_cxt = prodesc->mcxt;
 
 	for (i = 0; i < fcinfo->nargs; i++)
 	{
 		Oid argtype = procedure_struct->proargtypes.values[i];
-
 		type_tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(argtype));
 		if (!HeapTupleIsValid(type_tuple))
 			elog(ERROR, "cache lookup failed for type %u", argtype);
 
 		type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
-		fmgr_info_cxt(type_struct->typoutput, &(arg_out_func[i]), proc_cxt);
+		fmgr_info_cxt(type_struct->typoutput, &(prodesc->arg_out_func[i]), proc_cxt);
+		/* Whether it's a "true" array type */
+		is_array_type = (type_struct->typelem != 0 && type_struct->typlen == -1);
+		prodesc->arg_arraytype[i] = (is_array_type) ? argtypes[i] : InvalidOid;
+
 		ReleaseSysCache(type_tuple);
+		/* First check if the input argument is NULL */
+		if (fcinfo->args[i].isnull)
+		{
+			boxed_args[i] = jl_nothing;
+			continue;
+		}
+		boxed_args[i] = convert_arg_to_julia(fcinfo->args[i].value,
+				argtypes[i], prodesc, i);
 
-		value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
-		boxed_args[i] = pg_oid_to_julia(argtypes[i], value);
-
-		elog(DEBUG1, "[%d] %s = %s :: %u", i + 1, argnames[i], value, argtypes[i]);
+		elog(DEBUG1, "[%d] %s = %s :: %u", i, argnames[i], value, argtypes[i]);
 	}
+}
+
+jl_value_t *
+convert_arg_to_julia(Datum d, Oid argtype, pljulia_proc_desc *prodesc, int i)
+{
+	jl_value_t *result;
+	bool is_array_type = (prodesc->arg_arraytype[i] != InvalidOid);
+	if (is_array_type)
+		result = julia_array_from_datum(d, argtype);
+	else
+	{
+		char *value;
+		value = OutputFunctionCall(&prodesc->arg_out_func[i], d);
+		result = pg_oid_to_jl_value(argtype, value);
+	}
+
+	return result;
+}
+
+jl_value_t *
+julia_array_from_datum(Datum d, Oid argtype)
+{
+	ArrayType *ar;
+	Oid elementtype, typioparam, typoutputfunc;
+	int16 typlen;
+	bool typbyval;
+	char typalign, typdelim;
+	int i, j, nitems, ndims, *dims;
+	bool *nulls;
+	Datum *elements;
+	jl_array_t *jl_arr;
+	char *value;
+	jl_value_t *values[2];
+	jl_value_t *jl_boxed_elem, *untype, *atype;
+	FmgrInfo *arg_out_func;
+	Form_pg_type type_struct;
+	HeapTuple type_tuple;
+
+	arg_out_func = (FmgrInfo *) palloc0(sizeof(FmgrInfo));
+	ar = DatumGetArrayTypeP(d);
+	elementtype = ARR_ELEMTYPE(ar);
+	ndims = ARR_NDIM(ar);
+	dims = ARR_DIMS(ar);
+
+	get_typlenbyvalalign(elementtype, &typlen, &typbyval, &typalign);
+
+	/* get datum representation of each array element */
+	deconstruct_array(ar, elementtype, typlen, typbyval, typalign, &elements, &nulls,
+			&nitems);
+	// elements[i] is a datum
+
+	/* get the conversion function from Datum to elementtype */
+	type_tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(elementtype));
+	if (!HeapTupleIsValid(type_tuple))
+		elog(ERROR, "cache lookup failed for type %u", argtype);
+
+	type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
+	fmgr_info(type_struct->typoutput, arg_out_func);
+	ReleaseSysCache(type_tuple);
+
+	/* values is 2 elements: the array type which is a base type for now
+		* and the jl_nothing_type which is there to help handle null values
+		* which we convert to nothing in Julia
+		*/
+	values[0] = (jl_value_t *) jl_nothing_type;
+	values[1] = pg_oid_to_jl_datatype(elementtype);
+
+	untype = jl_apply_type((jl_value_t *) jl_uniontype_type, values, 2);
+	atype = jl_apply_array_type(untype, ndims);
+
+	switch (ndims)
+	{
+	case 1:
+		jl_arr = jl_alloc_array_1d(atype, dims[0]);
+		break;
+	case 2:
+		jl_arr = jl_alloc_array_2d(atype, dims[0], dims[1]);
+		break;
+	case 3:
+		jl_arr = jl_alloc_array_3d(atype, dims[0], dims[1], dims[2]);
+		break;
+	default:
+		elog(ERROR,
+				"PL/Julia does not currently support arrays of higher dimension than 3d");
+		break;
+	}
+
+	for (i = 0; i < nitems; i++)
+	{
+		j = calculate_cm_offset(i, dims, ndims);
+		/* Check whether null */
+		if (nulls[i])
+		{
+			jl_arrayset(jl_arr, (jl_value_t *) jl_nothing, j);
+			continue;
+		}
+		value = OutputFunctionCall(arg_out_func, elements[i]);
+
+		jl_boxed_elem = pg_oid_to_jl_value(elementtype, value);
+		jl_arrayset(jl_arr, (jl_value_t *) jl_boxed_elem, j);
+	}
+	return (jl_value_t *) jl_arr;
 }
 
 /*
@@ -396,6 +515,9 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 	prodesc->result_typid = procedure_struct->prorettype;
 	prodesc->mcxt = proc_cxt;
 	prodesc->fn_xmin = HeapTupleHeaderGetRawXmin(procedure_tuple->t_data);
+	/* this is filled later on when handling the input args */
+	prodesc->arg_out_func = (FmgrInfo *) palloc0(prodesc->nargs * sizeof(FmgrInfo));
+	prodesc->arg_arraytype = (Oid *) palloc0(prodesc->nargs * sizeof(Oid));
 	MemoryContextSwitchTo(oldcontext);
 
 	/* Create a new hashtable entry for the new function definition */
@@ -422,8 +544,8 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	jl_value_t **boxed_args;
 	HeapTuple procedure_tuple;
 	Form_pg_proc procedure_struct;
-	int i;
 	jl_value_t *ret;
+	jl_function_t *func;
 
 	pljulia_proc_desc *prodesc = NULL;
 
@@ -443,9 +565,7 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	 * this assumes that pljulia_compile inserts the function definition into
 	 * the interpreter
 	 */
-	jl_function_t *func = jl_get_function(jl_main_module,
-			prodesc->internal_proname);
-
+	func = jl_get_function(jl_main_module, prodesc->internal_proname);
 	if (jl_exception_occurred())
 		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 
@@ -457,7 +577,7 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	boxed_args = (jl_value_t **) palloc0(prodesc->nargs * sizeof(jl_value_t *));
 
 	julia_setup_input_args(fcinfo, procedure_tuple, procedure_struct,
-			boxed_args, prodesc->mcxt);
+			boxed_args, prodesc);
 	if (jl_exception_occurred())
 		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 	ret = jl_call(func, boxed_args, prodesc->nargs);
