@@ -1,0 +1,97 @@
+CREATE FUNCTION int_arr(x integer) RETURNS integer[] AS $$
+collect(1:x)
+$$ LANGUAGE pljulia;
+select int_arr(10);
+        int_arr         
+------------------------
+ {1,2,3,4,5,6,7,8,9,10}
+(1 row)
+
+DROP FUNCTION int_arr(integer);
+CREATE FUNCTION float_arr() RETURNS float4[] AS $$
+    A = Array{Float64, 2}(undef, 2, 3)
+    A .= [10, 20] .+ [1.93 2 3]
+    return A
+$$ LANGUAGE pljulia;
+select float_arr();
+           float_arr           
+-------------------------------
+ {{11.93,12,13},{21.93,22,23}}
+(1 row)
+
+DROP FUNCTION float_arr();
+CREATE FUNCTION return_input_array(x integer[]) RETURNS integer[] AS $$
+return x
+$$ LANGUAGE pljulia;
+select return_input_array('{{1,2,3}, {4,5,6}}'::INTEGER[]);
+ return_input_array 
+--------------------
+ {{1,2,3},{4,5,6}}
+(1 row)
+
+DROP FUNCTION return_input_array(integer []);
+CREATE FUNCTION return_array_with_nulls() RETURNS integer[] AS $$
+y = [1,2,3,nothing,5,6]
+$$ LANGUAGE pljulia;
+select return_array_with_nulls();
+ return_array_with_nulls 
+-------------------------
+ {1,2,3,NULL,5,6}
+(1 row)
+
+DROP FUNCTION return_array_with_nulls();
+CREATE FUNCTION string_1d() RETURNS TEXT[] AS $$
+fill("some string", 3)
+$$ LANGUAGE pljulia;
+select string_1d();
+                  string_1d                  
+---------------------------------------------
+ {"some string","some string","some string"}
+(1 row)
+
+DROP FUNCTION string_1d();
+CREATE FUNCTION string_2d() RETURNS TEXT[] AS $$
+[i*j for i in "abc", j in "123"]
+$$ LANGUAGE pljulia;
+select string_2d();
+             string_2d              
+------------------------------------
+ {{a1,a2,a3},{b1,b2,b3},{c1,c2,c3}}
+(1 row)
+
+DROP FUNCTION string_2d();
+CREATE FUNCTION string_3d() returns text[] AS $$
+[i*j*k for i in "abc", j in "123", k in "fn"]
+$$ LANGUAGE pljulia;
+select string_3d();
+                                             string_3d                                             
+---------------------------------------------------------------------------------------------------
+ {{{a1f,a1n},{a2f,a2n},{a3f,a3n}},{{b1f,b1n},{b2f,b2n},{b3f,b3n}},{{c1f,c1n},{c2f,c2n},{c3f,c3n}}}
+(1 row)
+
+DROP FUNCTION  string_3d();
+CREATE FUNCTION string_4d() returns text[] AS $$
+[i*j*k*l for i in "abc", j in "123", k in "fn", l in "str"]
+$$ LANGUAGE pljulia;
+select string_4d();
+                                                                                                                                                                  string_4d                                                                                                                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {{{{a1fs,a1ft,a1fr},{a1ns,a1nt,a1nr}},{{a2fs,a2ft,a2fr},{a2ns,a2nt,a2nr}},{{a3fs,a3ft,a3fr},{a3ns,a3nt,a3nr}}},{{{b1fs,b1ft,b1fr},{b1ns,b1nt,b1nr}},{{b2fs,b2ft,b2fr},{b2ns,b2nt,b2nr}},{{b3fs,b3ft,b3fr},{b3ns,b3nt,b3nr}}},{{{c1fs,c1ft,c1fr},{c1ns,c1nt,c1nr}},{{c2fs,c2ft,c2fr},{c2ns,c2nt,c2nr}},{{c3fs,c3ft,c3fr},{c3ns,c3nt,c3nr}}}}
+(1 row)
+
+DROP FUNCTION  string_4d();
+CREATE TYPE named_value AS (
+  name   text,
+  value  integer
+);
+CREATE FUNCTION comp_arr() returns named_value[] AS $$
+return [("Name", 7), ("Surname", 8)]
+$$ LANGUAGE pljulia;
+select comp_arr();
+          comp_arr          
+----------------------------
+ {"(Name,7)","(Surname,8)"}
+(1 row)
+
+DROP FUNCTION comp_arr();
+DROP TYPE named_value;

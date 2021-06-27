@@ -1,0 +1,20 @@
+CREATE TABLE employee (
+    name text,
+    basesalary integer,
+    bonus integer
+);
+create function overpaid(e employee) returns integer as $$
+if e["basesalary"] > 100
+    res = 1
+else
+    res = -1
+end
+$$ language pljulia;
+SELECT overpaid(('Anna', 113, 20)::employee);
+ overpaid 
+----------
+        1
+(1 row)
+
+drop function overpaid(employee);
+drop table employee;

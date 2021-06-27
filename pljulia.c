@@ -17,6 +17,10 @@
 #include <utils/memutils.h>
 #include <utils/builtins.h>
 #include <utils/syscache.h>
+#include <utils/typcache.h>
+#include <utils/rel.h>
+#include <utils/fmgroids.h>
+#include <funcapi.h>
 
 #include <sys/time.h>
 #include <julia.h>
@@ -24,6 +28,7 @@
 
 #define DOUBLE_LEN 316
 #define LONG_INT_LEN 20
+#define jl_is_dict(ret) (strcmp(jl_typeof_str(ret), "Dict") == 0)
 
 /**********************************************************************
  * The information we cache about loaded procedures.
@@ -42,9 +47,12 @@ typedef struct pljulia_proc_desc
 	int nargs;              /* number of arguments */
 	TransactionId fn_xmin;
 	char *function_body;
-	FmgrInfo *arg_out_func; /* output fns for arg types, kept to convert from datum to cstring */
+	FmgrInfo *arg_out_func; /* output fns for arg types, kept to convert from
+	                           datum to cstring */
 	Oid *arg_arraytype;     /* InvalidOid if not an array */
-
+	bool *arg_is_rowtype;   /* is the argument composite? */
+	bool fn_retisset;       /* true if function returns set (SRF) */
+	bool fn_retistuple;     /* true if function returns composite */
 } pljulia_proc_desc;
 
 /* The procedure hash key */
@@ -74,13 +82,18 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(pljulia_call_handler);
 
 static Datum cstring_to_type(char *, Oid);
-static Datum jl_value_t_to_datum(FunctionCallInfo, jl_value_t *, Oid);
+static Datum jl_value_t_to_datum(FunctionCallInfo, jl_value_t *, Oid, bool);
 pljulia_proc_desc *pljulia_compile(FunctionCallInfo, HeapTuple, Form_pg_proc);
 static Datum pljulia_execute(FunctionCallInfo);
-void julia_setup_input_args(FunctionCallInfo, HeapTuple, Form_pg_proc, jl_value_t **,
-                            pljulia_proc_desc *);
+void julia_setup_input_args(FunctionCallInfo, HeapTuple, Form_pg_proc,
+                            jl_value_t **, pljulia_proc_desc *);
 jl_value_t *convert_arg_to_julia(Datum, Oid, pljulia_proc_desc *, int);
 jl_value_t *julia_array_from_datum(Datum, Oid);
+jl_value_t *julia_dict_from_datum(Datum);
+jl_value_t *pljulia_dict_from_tuple(HeapTuple, TupleDesc, bool);
+Datum pg_array_from_julia_array(FunctionCallInfo, jl_value_t *, Oid);
+Datum pg_composite_from_julia_tuple(FunctionCallInfo, jl_value_t *, Oid, bool);
+Datum pg_composite_from_julia_dict(FunctionCallInfo, jl_value_t *, Oid, bool);
 void _PG_init(void);
 
 void
@@ -109,6 +122,25 @@ _PG_init(void)
 	pljulia_proc_hashtable =
 			hash_create("PL/Julia cached procedures hashtable", 32, &hash_ctl,
 					HASH_ELEM);
+
+	char *dict_set_command, *dict_get_command;
+	/* The following functions are declared here and will be used to convert
+	 * composite types to dictionaries. There might be a nicer way to do this
+	 * using type constructors from Julia's C-API but it wasn't very obvious how.
+	 */
+	dict_set_command = "function dict_set(key, val, dict)\n"
+			"dict[key] = val\n"
+			"end";
+	dict_get_command = "function dict_get(key, dict)\n"
+			"if haskey(dict,key)\n"
+			"return dict[key]\n"
+			"else\n"
+			"return nothing\n"
+			"end\n"
+			"end";
+	/* add these functions to jl_main_module */
+	jl_eval_string(dict_get_command);
+	jl_eval_string(dict_set_command);
 }
 
 /*
@@ -130,10 +162,15 @@ cstring_to_type(char *input, Oid typeoid)
  * Convert the Julia result to a Datum of type "typeoid".
  */
 static Datum
-jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
+jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype, bool usefcinfo)
 {
+	/*maybe I should check the depth of the recursion stack */
 	char *buffer;
 
+	/* A nothing in Julia is a NULL in Postgres */
+	if (jl_is_nothing(ret))
+		PG_RETURN_VOID();
+	/* Handle base types */
 	if (jl_is_string(ret))
 	{
 		elog(DEBUG1, "ret (string): %s", jl_string_ptr(ret));
@@ -149,6 +186,15 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
 		buffer = (char *) palloc0((DOUBLE_LEN + 1) * sizeof(char));
 		snprintf(buffer, DOUBLE_LEN, "%f", ret_unboxed);
 	}
+	else if (jl_typeis(ret, jl_float32_type))
+	{
+		double ret_unboxed = jl_unbox_float32(ret);
+
+		elog(DEBUG1, "ret (float32): %f", jl_unbox_float32(ret));
+
+		buffer = (char *) palloc0((DOUBLE_LEN + 1) * sizeof(char));
+		snprintf(buffer, DOUBLE_LEN, "%f", ret_unboxed);
+	}
 	else if (jl_typeis(ret, jl_int64_type))
 	{
 		long int ret_unboxed = jl_unbox_int64(ret);
@@ -158,6 +204,24 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
 		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
 		snprintf(buffer, LONG_INT_LEN, "%ld", ret_unboxed);
 	}
+	else if (jl_typeis(ret, jl_int32_type))
+	{
+		int ret_unboxed = jl_unbox_int32(ret);
+
+		elog(DEBUG1, "ret (int32): %d", jl_unbox_int32(ret));
+
+		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
+		snprintf(buffer, LONG_INT_LEN, "%d", ret_unboxed);
+	}
+	else if (jl_typeis(ret, jl_char_type))
+	{
+		char ret_unboxed = jl_unbox_int32(ret);
+
+		elog(DEBUG1, "ret (int32): %d", jl_unbox_int32(ret));
+
+		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
+		snprintf(buffer, LONG_INT_LEN, "%c", ret_unboxed);
+	}
 	else if (jl_typeis(ret, jl_bool_type))
 	{
 		int ret_unboxed  = jl_unbox_bool(ret);
@@ -165,6 +229,21 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype)
 
 		buffer = (char *) palloc0((LONG_INT_LEN + 1) * sizeof(char));
 		snprintf(buffer, LONG_INT_LEN, "%d", ret_unboxed);
+	}
+	/* If not a base type, but still a valid type */
+	else if (jl_is_array(ret))
+	{
+		/* handle the arraytype */
+		PG_RETURN_DATUM(pg_array_from_julia_array(fcinfo, ret, prorettype));
+	}
+	else if (jl_is_tuple(ret))
+	{
+		/* handle the tupletype - return a composite */
+		PG_RETURN_DATUM(pg_composite_from_julia_tuple(fcinfo, ret, prorettype, usefcinfo));
+	}
+	else if (jl_is_dict(ret))
+	{
+		PG_RETURN_DATUM(pg_composite_from_julia_dict(fcinfo, ret, prorettype, usefcinfo));
 	}
 	else
 	{
@@ -201,10 +280,15 @@ julia_setup_input_args(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		if (!HeapTupleIsValid(type_tuple))
 			elog(ERROR, "cache lookup failed for type %u", argtype);
 
+		prodesc->arg_is_rowtype[i] = type_is_rowtype(argtypes[i]);
+
 		type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
-		fmgr_info_cxt(type_struct->typoutput, &(prodesc->arg_out_func[i]), proc_cxt);
+		if (!prodesc->arg_is_rowtype[i])
+			fmgr_info_cxt(type_struct->typoutput, &(prodesc->arg_out_func[i]),
+					proc_cxt);
 		/* Whether it's a "true" array type */
-		is_array_type = (type_struct->typelem != 0 && type_struct->typlen == -1);
+		is_array_type = (type_struct->typelem != 0 &&
+				type_struct->typlen == -1);
 		prodesc->arg_arraytype[i] = (is_array_type) ? argtypes[i] : InvalidOid;
 
 		ReleaseSysCache(type_tuple);
@@ -228,6 +312,10 @@ convert_arg_to_julia(Datum d, Oid argtype, pljulia_proc_desc *prodesc, int i)
 	bool is_array_type = (prodesc->arg_arraytype[i] != InvalidOid);
 	if (is_array_type)
 		result = julia_array_from_datum(d, argtype);
+	else if (prodesc->arg_is_rowtype[i])
+	{
+		result = julia_dict_from_datum(d);
+	}
 	else
 	{
 		char *value;
@@ -236,6 +324,86 @@ convert_arg_to_julia(Datum d, Oid argtype, pljulia_proc_desc *prodesc, int i)
 	}
 
 	return result;
+}
+
+jl_value_t *
+julia_dict_from_datum(Datum d)
+{
+	HeapTupleHeader td;
+	Oid tupType;
+	int32 tupTypmod;
+	TupleDesc tupdesc = NULL;
+	HeapTupleData tmptup;
+	jl_value_t *ret;
+
+	td = DatumGetHeapTupleHeader(d);
+	/* Extract rowtype info and find a tupdesc */
+	tupType = HeapTupleHeaderGetTypeId(td);
+	tupTypmod = HeapTupleHeaderGetTypMod(td);
+	tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+	/* Build a temporary HeapTuple control structure */
+	tmptup.t_len = HeapTupleHeaderGetDatumLength(td);
+	tmptup.t_data = td;
+
+	ret = pljulia_dict_from_tuple(&tmptup, tupdesc, true);
+	ReleaseTupleDesc(tupdesc);
+	return ret;
+}
+
+jl_value_t *
+pljulia_dict_from_tuple(HeapTuple tuple, TupleDesc tupdesc,
+		bool include_generated)
+{
+	int i;
+	Form_pg_attribute att;
+	char *attname;
+	Datum attr;
+	bool isnull;
+	Oid typoutput;
+	bool typisvarlena;
+	jl_value_t *dict, *key, *value;
+	jl_function_t *dict_set;
+
+	/* dict_set(key, value, dict) */
+	dict_set = jl_get_function(jl_main_module, "dict_set");
+	/* create an empty dictionary ({Any, Any}) */
+	dict = jl_eval_string("Dict()");
+
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		att = TupleDescAttr(tupdesc, i);
+		/* ignore dropped */
+		if (att->attisdropped)
+			continue;
+		if (att->attgenerated && !include_generated)
+			continue;
+		/* get attribute name */
+		attname = NameStr(att->attname);
+		key = jl_cstr_to_string(attname);
+		/* get its value as Datum */
+		attr = heap_getattr(tuple, i + 1, tupdesc, &isnull);
+		getTypeOutputInfo(att->atttypid, &typoutput, &typisvarlena);
+
+		if (isnull)
+		{
+			/* just do dict[attname] = nothing */
+			jl_call3(dict_set, key, (jl_value_t *)jl_nothing, dict);
+			continue;
+		}
+
+		/* not NULL: convert the value to its julia representation first,
+		 * then call dict_set to insert it in the dictionary. For now assume all
+		 * fields of the tuple will be base types.
+		 */
+		else
+		{
+			char *outputstr;
+			outputstr = OidOutputFunctionCall(typoutput, attr);
+			value = pg_oid_to_jl_value(att->atttypid, outputstr);
+			jl_call3(dict_set, key, (jl_value_t *)value, dict);
+		}
+	}
+	return dict;
 }
 
 jl_value_t *
@@ -266,8 +434,8 @@ julia_array_from_datum(Datum d, Oid argtype)
 	get_typlenbyvalalign(elementtype, &typlen, &typbyval, &typalign);
 
 	/* get datum representation of each array element */
-	deconstruct_array(ar, elementtype, typlen, typbyval, typalign, &elements, &nulls,
-			&nitems);
+	deconstruct_array(ar, elementtype, typlen, typbyval, typalign, &elements,
+			&nulls, &nitems);
 	// elements[i] is a datum
 
 	/* get the conversion function from Datum to elementtype */
@@ -280,9 +448,9 @@ julia_array_from_datum(Datum d, Oid argtype)
 	ReleaseSysCache(type_tuple);
 
 	/* values is 2 elements: the array type which is a base type for now
-		* and the jl_nothing_type which is there to help handle null values
-		* which we convert to nothing in Julia
-		*/
+	 * and the jl_nothing_type which is there to help handle null values
+	 * which we convert to nothing in Julia
+	 */
 	values[0] = (jl_value_t *) jl_nothing_type;
 	values[1] = pg_oid_to_jl_datatype(elementtype);
 
@@ -308,7 +476,7 @@ julia_array_from_datum(Datum d, Oid argtype)
 
 	for (i = 0; i < nitems; i++)
 	{
-		j = calculate_cm_offset(i, dims, ndims);
+		j = calculate_cm_offset(i, ndims, dims);
 		/* Check whether null */
 		if (nulls[i])
 		{
@@ -513,11 +681,14 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 	prodesc->internal_proname = pstrdup(internal_procname);
 	prodesc->nargs = fcinfo->nargs;
 	prodesc->result_typid = procedure_struct->prorettype;
+	prodesc->fn_retisset = procedure_struct->proretset;
+	prodesc->fn_retistuple = type_is_rowtype(procedure_struct->prorettype);
 	prodesc->mcxt = proc_cxt;
 	prodesc->fn_xmin = HeapTupleHeaderGetRawXmin(procedure_tuple->t_data);
 	/* this is filled later on when handling the input args */
 	prodesc->arg_out_func = (FmgrInfo *) palloc0(prodesc->nargs * sizeof(FmgrInfo));
 	prodesc->arg_arraytype = (Oid *) palloc0(prodesc->nargs * sizeof(Oid));
+	prodesc->arg_is_rowtype = (bool *) palloc0(prodesc->nargs * sizeof(bool));
 	MemoryContextSwitchTo(oldcontext);
 
 	/* Create a new hashtable entry for the new function definition */
@@ -566,6 +737,7 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	 * the interpreter
 	 */
 	func = jl_get_function(jl_main_module, prodesc->internal_proname);
+
 	if (jl_exception_occurred())
 		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 
@@ -584,5 +756,181 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	if (jl_exception_occurred())
 		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 
-	return jl_value_t_to_datum(fcinfo, ret, procedure_struct->prorettype);
+	return jl_value_t_to_datum(fcinfo, ret, procedure_struct->prorettype, true);
+}
+
+Datum
+pg_array_from_julia_array(FunctionCallInfo fcinfo, jl_value_t *ret,
+		Oid prorettype)
+{
+	ArrayType *array;
+	Datum *array_elem;
+	bool *nulls = NULL;
+	int16 typlen;
+	bool typbyval;
+	char typalign;
+	int row_major_offset;
+	Oid elem_type = get_element_type(prorettype);
+	size_t len = jl_array_len(ret);
+	int ndim = jl_array_ndims(ret);
+	int *dims = (int *) palloc0(sizeof(int) * ndim);
+	int *lbs = (int *) palloc0(sizeof(int) * ndim);
+	int i;
+	jl_value_t *curr_elem;
+
+	for (i = 0; i < ndim; i++)
+	{
+		dims[i] = jl_array_dim(ret, i);
+		lbs[i] = 1;
+	}
+	elog(DEBUG1, "len : %zu\n", len);
+
+	array_elem = (Datum *) palloc0(sizeof(Datum) * len);
+
+	for (i = 0; i < len; i++)
+	{
+		row_major_offset = calculate_rm_offset(i, ndim, dims);
+		curr_elem = jl_arrayref(ret, i);
+		/* if jl_nothing then set it as NULL */
+		if (jl_typeis(curr_elem, jl_nothing_type))
+		{
+			/* first null we found, so palloc */
+			if (!nulls)
+				nulls = (bool *) palloc0(sizeof(bool) * len);
+
+			nulls[i] = true;
+			continue;
+		}
+
+		array_elem[row_major_offset] = jl_value_t_to_datum(fcinfo, curr_elem,
+		                                                   elem_type, false);
+		/* if for some reason it wasn't possible to */
+	}
+	get_typlenbyvalalign(elem_type, &typlen, &typbyval, &typalign);
+	array = construct_md_array(array_elem, nulls, ndim, dims, lbs, elem_type,
+			typlen, typbyval, typalign);
+	PG_RETURN_ARRAYTYPE_P(array);
+}
+
+Datum
+pg_composite_from_julia_tuple(FunctionCallInfo fcinfo, jl_value_t *ret,
+                              Oid prorettype, bool usefcinfo)
+{
+	int nfields, i;
+	jl_value_t *curr_elem;
+	TupleDesc tupdesc;
+	Oid resultTypeId;
+	Datum *elements;
+	bool *nulls = NULL;
+	HeapTuple tup;
+	Datum attr;
+	Form_pg_attribute att;
+
+	if (usefcinfo)
+	{
+		if (get_call_result_type(fcinfo, &resultTypeId, &tupdesc) !=
+	    TYPEFUNC_COMPOSITE)
+		elog(ERROR, "function returning record called in context that cannot "
+				"accept type record");
+	}
+
+	/* if !usefcinfo then don't use it to get a tupdesc because we've been
+	 * called from pg_array_from_julia_array and fcinfo concerns the
+	 * array, not the tuple we need to build */
+	else
+	{
+		/* set typmod -1 because we don't expect a domain. For domains extra work
+		 * needs to be done */
+		tupdesc = lookup_rowtype_tupdesc(prorettype, -1);
+	}
+
+	nfields = jl_nfields(ret);
+	if (tupdesc->natts != nfields)
+		elog(ERROR, "Tuple number of fields mismatch");
+
+	elements = (Datum *) palloc0(sizeof(Datum) * nfields);
+	nulls = (bool *) palloc0(sizeof(bool) * nfields);
+
+	for (i = 0; i < nfields; i++)
+	{
+		curr_elem = jl_get_nth_field(ret, i);
+		if (jl_typeis(curr_elem, jl_nothing_type))
+		{
+			nulls[i] = true;
+			continue;
+		}
+		nulls[i] = false;
+		att = TupleDescAttr(tupdesc, i);
+
+		elements[i] = jl_value_t_to_datum(fcinfo, curr_elem, att->atttypid, false);
+	}
+	tup = heap_form_tuple(tupdesc, elements, nulls);
+	ReleaseTupleDesc(tupdesc);
+	return HeapTupleGetDatum(tup);
+}
+
+Datum
+pg_composite_from_julia_dict(FunctionCallInfo fcinfo, jl_value_t *ret,
+                              Oid prorettype, bool usefcinfo)
+{
+	int nfields, i;
+	jl_value_t *curr_elem, *key;
+	TupleDesc tupdesc;
+	Oid resultTypeId;
+	Datum *elements;
+	bool *nulls = NULL;
+	HeapTuple tup;
+	Datum attr;
+	char *attname;
+	Form_pg_attribute att;
+	jl_function_t *dict_get, *dict_nfields;
+
+	if (usefcinfo)
+	{
+		if (get_call_result_type(fcinfo, &resultTypeId, &tupdesc) !=
+		    TYPEFUNC_COMPOSITE)
+			elog(ERROR,
+			     "function returning record called in context that cannot "
+			     "accept type record");
+	}
+
+	/* if !usefcinfo then don't use it to get a tupdesc because we've been
+	 * called from pg_array_from_julia_array and fcinfo concerns the
+	 * array, not the tuple we need to build */
+	else
+	{
+		/* set typmod -1 because we don't expect a domain. For domains extra
+		 * work needs to be done */
+		tupdesc = lookup_rowtype_tupdesc(prorettype, -1);
+	}
+
+	/* the number of entries in the dictionary equals its length */
+	dict_nfields = jl_get_function(jl_base_module, "length");
+	dict_get = jl_get_function(jl_main_module, "dict_get");
+	nfields = jl_unbox_int64(jl_call1(dict_nfields, ret));
+	if (tupdesc->natts != nfields)
+		elog(ERROR, "Dict number of fields mismatch");
+
+	elements = (Datum *) palloc0(sizeof(Datum) * nfields);
+	nulls = (bool *) palloc0(sizeof(bool) * nfields);
+
+	for (i = 0; i < nfields; i++)
+	{
+		att = TupleDescAttr(tupdesc, i);
+		attname = NameStr(att->attname);
+		key = jl_cstr_to_string(attname);
+		curr_elem = jl_call2(dict_get, key, ret);
+		if (jl_typeis(curr_elem, jl_nothing_type))
+		{
+			nulls[i] = true;
+			continue;
+		}
+		nulls[i] = false;
+
+		elements[i] = jl_value_t_to_datum(fcinfo, curr_elem, att->atttypid,
+		                                  false);
+	}
+	tup = heap_form_tuple(tupdesc, elements, nulls);
+	ReleaseTupleDesc(tupdesc);
+	return HeapTupleGetDatum(tup);
 }

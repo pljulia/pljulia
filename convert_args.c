@@ -111,7 +111,7 @@ pg_oid_to_jl_datatype(Oid argtype)
  * (Julia-indexing)
  */
 int
-calculate_cm_offset(int index_rm, int *dims, int ndims)
+calculate_cm_offset(int index_rm, int ndims, int *dims)
 {
 	int *indices = (int *) palloc0(sizeof(int) * ndims);
 	int offset = index_rm;
@@ -137,4 +137,35 @@ calculate_cm_offset(int index_rm, int *dims, int ndims)
 	}
 	pfree(indices);
 	return col_major_offset;
+}
+
+/*
+ * Convert the given memory offset from its column-major to the
+ * equivalent row-major value
+ */
+int calculate_rm_offset(int index_cm, int ndims, int *dims)
+{
+	int *indices = (int *) palloc0(sizeof(int) * ndims);
+	int offset = index_cm;
+	int row_major_offset = 0;
+
+	/*
+		* Get the indices (n1, n2, ... , nd) from the offset.
+		* Since the array is stored in column-major order, the
+		* formula that calculates the offset from the indices is
+		* n1 + (N1 * (n2 + N2 * (n3 + N3 * (...))))
+		*/
+	for (int i = 0; i < ndims; i++)
+	{
+		indices[i] = offset % dims[i];
+		offset = offset / dims[i];
+	}
+
+	/* Now calculate the offset for the row-major representation */
+	for (int i = 0; i < ndims; i++)
+	{
+		row_major_offset = row_major_offset * dims[i] + indices[i];
+	}
+	pfree(indices);
+	return row_major_offset;
 }
