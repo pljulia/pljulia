@@ -21,6 +21,7 @@
 #include <utils/rel.h>
 #include <utils/fmgroids.h>
 #include <funcapi.h>
+#include <miscadmin.h>
 
 #include <sys/time.h>
 #include <julia.h>
@@ -72,6 +73,22 @@ typedef struct pljulia_hash_entry
 	pljulia_proc_desc *prodesc;
 } pljulia_hash_entry;
 
+/* This struct holds information about a single function call */
+typedef struct pljulia_call_data
+{
+	FunctionCallInfo fcinfo;
+	pljulia_proc_desc *prodesc;
+	/*
+	 * Information for SRFs and functions returning composite types.
+	 */
+	TupleDesc ret_tupdesc;    /* return rowtype, if retistuple or retisset */
+	AttInMetadata *attinmeta; /* metadata for building tuples of that type */
+	Tuplestorestate *tuple_store; /* SRFs accumulate result here */
+	MemoryContext tmp_cxt;        /* context for tuplestore */
+} pljulia_call_data;
+
+/* This is saved and restored by pljulia_call_handler */
+static pljulia_call_data *current_call_data = NULL;
 /* The hash table we use to lookup the function in case it already exists */
 static HTAB *pljulia_proc_hashtable = NULL;
 
@@ -95,6 +112,127 @@ Datum pg_array_from_julia_array(FunctionCallInfo, jl_value_t *, Oid);
 Datum pg_composite_from_julia_tuple(FunctionCallInfo, jl_value_t *, Oid, bool);
 Datum pg_composite_from_julia_dict(FunctionCallInfo, jl_value_t *, Oid, bool);
 void _PG_init(void);
+static HeapTuple pljulia_build_tuple_result(jl_value_t *, TupleDesc);
+void pljulia_return_next(jl_value_t *);
+
+void
+pljulia_return_next(jl_value_t *obj)
+{
+	pljulia_call_data *call_data;
+	FunctionCallInfo fcinfo;
+	pljulia_proc_desc *prodesc;
+	MemoryContext old_cxt;
+	ReturnSetInfo *rsi;
+
+	call_data = current_call_data;
+	fcinfo = call_data->fcinfo;
+	prodesc = call_data->prodesc;
+	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	if (!prodesc->fn_retisset)
+		elog(ERROR, "return_next called in function that doesn't return set");
+
+	/* Set up tuple store if first output row */
+	if (!call_data->ret_tupdesc)
+	{
+		TupleDesc tupdesc;
+
+		if (prodesc->fn_retistuple)
+		{
+			Oid typid;
+			if (get_call_result_type(fcinfo, &typid, &tupdesc) !=
+					TYPEFUNC_COMPOSITE)
+				elog(ERROR, "function returning record called in context that "
+						"cannot accept type record");
+		}
+		else
+		{
+			tupdesc = rsi->expectedDesc;
+			if (tupdesc == NULL || tupdesc->natts != 1)
+				elog(ERROR, "expected single-column result descriptor for "
+						"non-composite SETOF result");
+		}
+		/*
+		 * Make sure the tuple_store and ret_tdesc are sufficiently
+		 * long-lived.
+		 */
+		old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
+
+		current_call_data->ret_tupdesc = CreateTupleDescCopy(tupdesc);
+		current_call_data->tuple_store = tuplestore_begin_heap(rsi->allowedModes
+				& SFRM_Materialize_Random,
+				false, work_mem);
+
+		MemoryContextSwitchTo(old_cxt);
+	}
+	/* done with first-call initializations */
+	if (!current_call_data->tmp_cxt)
+	{
+		current_call_data->tmp_cxt = AllocSetContextCreate(
+		    CurrentMemoryContext, "PL/Julia return_next temp context",
+		    ALLOCSET_SMALL_SIZES);
+	}
+	old_cxt = MemoryContextSwitchTo(current_call_data->tmp_cxt);
+
+	if (prodesc->fn_retistuple)
+	{
+		HeapTuple tuple;
+		tuple = pljulia_build_tuple_result(obj, current_call_data->ret_tupdesc);
+		tuplestore_puttuple(call_data->tuple_store, tuple);
+	}
+	else if (prodesc->result_typid)
+	{
+		Datum ret[1];
+		bool isNull[1];
+		if (!obj || jl_is_nothing(obj))
+			isNull[0] = true;
+		else
+			isNull[0] = false;
+		ret[0] = jl_value_t_to_datum(fcinfo, obj, prodesc->result_typid, false);
+		tuplestore_putvalues(call_data->tuple_store, call_data->ret_tupdesc,
+				ret, isNull);
+	}
+	MemoryContextSwitchTo(old_cxt);
+	MemoryContextReset(current_call_data->tmp_cxt);
+}
+
+static HeapTuple
+pljulia_build_tuple_result(jl_value_t *obj, TupleDesc tupdesc)
+{
+	Datum *values;
+	bool *nulls;
+	HeapTuple tup;
+	int nfields;
+	Form_pg_attribute att;
+	int i;
+	jl_value_t *curr_elem;
+
+	nfields = jl_nfields(obj);
+	if (tupdesc->natts != nfields)
+		elog(ERROR, "Tuple number of fields mismatch");
+
+	values = (Datum *) palloc0(sizeof(Datum) * nfields);
+	nulls = (bool *) palloc0(sizeof(bool) * nfields);
+
+	for (i = 0; i < nfields; i++)
+	{
+		curr_elem = jl_get_nth_field(obj, i);
+		if (jl_typeis(curr_elem, jl_nothing_type))
+		{
+			nulls[i] = true;
+			continue;
+		}
+		nulls[i] = false;
+		att = TupleDescAttr(tupdesc, i);
+
+		values[i] = jl_value_t_to_datum(current_call_data->fcinfo, curr_elem,
+				att->atttypid, false);
+	}
+	tup = heap_form_tuple(tupdesc, values, nulls);
+	pfree(nulls);
+	pfree(values);
+	return tup;
+}
 
 void
 _PG_init(void)
@@ -141,6 +279,8 @@ _PG_init(void)
 	/* add these functions to jl_main_module */
 	jl_eval_string(dict_get_command);
 	jl_eval_string(dict_set_command);
+	jl_eval_string(
+			"return_next(arg) = ccall(:pljulia_return_next, Cvoid, (Any,), arg)");
 }
 
 /*
@@ -497,9 +637,18 @@ julia_array_from_datum(Datum d, Oid argtype)
 Datum pljulia_call_handler(PG_FUNCTION_ARGS)
 {
 	Datum ret;
+	pljulia_call_data *volatile save_call_data = current_call_data;
+	pljulia_call_data this_call_data;
 
+	/* Initialize current-call status record */
+	MemSet(&this_call_data, 0, sizeof(this_call_data));
+	this_call_data.fcinfo = fcinfo;
+
+	current_call_data = &this_call_data;
 	/* run Julia code */
 	ret = pljulia_execute(fcinfo);
+
+	current_call_data = save_call_data;
 
 	/*
 	 * strongly recommended: notify Julia that the program is about to
@@ -717,8 +866,11 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	Form_pg_proc procedure_struct;
 	jl_value_t *ret;
 	jl_function_t *func;
+	Datum retval;
+	ReturnSetInfo *rsi;
 
 	pljulia_proc_desc *prodesc = NULL;
+	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	procedure_tuple = SearchSysCache(PROCOID,
 			ObjectIdGetDatum(fcinfo->flinfo->fn_oid), 0, 0, 0);
@@ -729,7 +881,7 @@ pljulia_execute(FunctionCallInfo fcinfo)
 
 	/* function definition + body code */
 	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct);
-
+	current_call_data->prodesc = prodesc;
 	ReleaseSysCache(procedure_tuple);
 
 	/*
@@ -753,10 +905,33 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	if (jl_exception_occurred())
 		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 	ret = jl_call(func, boxed_args, prodesc->nargs);
-	if (jl_exception_occurred())
-		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
 
-	return jl_value_t_to_datum(fcinfo, ret, procedure_struct->prorettype, true);
+	if (jl_exception_occurred())
+		elog(ERROR, "%s",
+		     jl_string_ptr(jl_eval_string(
+		         "sprint(showerror, ccall(:jl_exception_occurred, Any, ()))")));
+	/* if fn_retisset handle differently...
+	 * jl_value_t_to_datum only if we have a non-srf */
+
+	if (prodesc->fn_retisset)
+	{
+		rsi->returnMode = SFRM_Materialize;
+		/* if we have any tuples to return */
+		if (current_call_data->tuple_store)
+		{
+			rsi->setResult = current_call_data->tuple_store;
+			rsi->setDesc = current_call_data->ret_tupdesc;
+		}
+		/* equivalent to PG_RERTURN_NULL */
+		retval = (Datum) 0;
+		fcinfo->isnull = true;
+	}
+	else
+	{
+		retval = jl_value_t_to_datum(fcinfo, ret, procedure_struct->prorettype,
+		                             true);
+	}
+	return retval;
 }
 
 Datum
