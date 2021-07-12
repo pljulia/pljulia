@@ -1,0 +1,2 @@
+DO $$ elog("INFO", "Prints an info message") $$ language pljulia;
+INFO:  Prints an info message

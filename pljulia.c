@@ -112,6 +112,7 @@ MemoryContext TopMemoryContext = NULL;
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pljulia_call_handler);
+PG_FUNCTION_INFO_V1(pljulia_inline_handler);
 
 static Datum cstring_to_type(char *, Oid);
 static Datum jl_value_t_to_datum(FunctionCallInfo, jl_value_t *, Oid, bool);
@@ -765,6 +766,25 @@ julia_array_from_datum(Datum d, Oid argtype)
 		jl_arrayset(jl_arr, (jl_value_t *) jl_boxed_elem, j);
 	}
 	return (jl_value_t *) jl_arr;
+}
+
+Datum
+pljulia_inline_handler(PG_FUNCTION_ARGS)
+{
+	/*
+	 * An inline code block is basically a function that doesn't take input
+	 * arguments and does not return anything (void)
+	 */
+	InlineCodeBlock *codeblock = (InlineCodeBlock *) PG_GETARG_POINTER(0);
+	char	   *source_code = codeblock->source_text;
+
+	jl_eval_string(source_code);
+	if (jl_exception_occurred())
+		elog(ERROR, "%s",
+			 jl_string_ptr(jl_eval_string(
+										  "sprint(showerror, ccall(:jl_exception_occurred, Any, ()))")));
+
+	PG_RETURN_VOID();
 }
 
 /*
