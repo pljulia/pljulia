@@ -279,6 +279,7 @@ _PG_init(void)
 	/* add these functions to jl_main_module */
 	jl_eval_string(dict_get_command);
 	jl_eval_string(dict_set_command);
+	jl_eval_string("init_nulls_anyarray(dims) = Array{Any}(nothing,dims)");
 	jl_eval_string(
 			"return_next(arg) = ccall(:pljulia_return_next, Cvoid, (Any,), arg)");
 }
@@ -559,8 +560,11 @@ julia_array_from_datum(Datum d, Oid argtype)
 	Datum *elements;
 	jl_array_t *jl_arr;
 	char *value;
-	jl_value_t *values[2];
-	jl_value_t *jl_boxed_elem, *untype, *atype;
+	jl_value_t **types,**tupvalues; /* types: the dimension types, so all int64
+									tupvalues: the size of each dimension  */
+	jl_tupletype_t *tt;
+	jl_function_t *init_arr;
+	jl_value_t *jl_boxed_elem, *dimtuple;
 	FmgrInfo *arg_out_func;
 	Form_pg_type type_struct;
 	HeapTuple type_tuple;
@@ -570,6 +574,9 @@ julia_array_from_datum(Datum d, Oid argtype)
 	elementtype = ARR_ELEMTYPE(ar);
 	ndims = ARR_NDIM(ar);
 	dims = ARR_DIMS(ar);
+
+	types = (jl_value_t **) palloc0(ndims * sizeof(jl_value_t *));
+	tupvalues = (jl_value_t **) palloc0(ndims * sizeof(jl_value_t *));
 
 	get_typlenbyvalalign(elementtype, &typlen, &typbyval, &typalign);
 
@@ -587,32 +594,17 @@ julia_array_from_datum(Datum d, Oid argtype)
 	fmgr_info(type_struct->typoutput, arg_out_func);
 	ReleaseSysCache(type_tuple);
 
-	/* values is 2 elements: the array type which is a base type for now
-	 * and the jl_nothing_type which is there to help handle null values
-	 * which we convert to nothing in Julia
-	 */
-	values[0] = (jl_value_t *) jl_nothing_type;
-	values[1] = pg_oid_to_jl_datatype(elementtype);
+	for (i = 0; i < ndims; i++)
+		types[i] = (jl_value_t *) jl_int64_type;
 
-	untype = jl_apply_type((jl_value_t *) jl_uniontype_type, values, 2);
-	atype = jl_apply_array_type(untype, ndims);
+    tt = jl_apply_tuple_type_v(types, ndims);
 
-	switch (ndims)
-	{
-	case 1:
-		jl_arr = jl_alloc_array_1d(atype, dims[0]);
-		break;
-	case 2:
-		jl_arr = jl_alloc_array_2d(atype, dims[0], dims[1]);
-		break;
-	case 3:
-		jl_arr = jl_alloc_array_3d(atype, dims[0], dims[1], dims[2]);
-		break;
-	default:
-		elog(ERROR,
-				"PL/Julia does not currently support arrays of higher dimension than 3d");
-		break;
-	}
+    for (i = 0; i < ndims; i++)
+		tupvalues[i] = jl_box_int64(dims[i]);
+
+    dimtuple = jl_new_structv(tt, tupvalues, ndims);
+	init_arr = jl_get_function(jl_main_module, "init_nulls_anyarray");
+    jl_arr = jl_call1(init_arr, dimtuple);
 
 	for (i = 0; i < nitems; i++)
 	{
@@ -620,6 +612,7 @@ julia_array_from_datum(Datum d, Oid argtype)
 		/* Check whether null */
 		if (nulls[i])
 		{
+			/* already initialized to nothing so this is redundant */
 			jl_arrayset(jl_arr, (jl_value_t *) jl_nothing, j);
 			continue;
 		}
