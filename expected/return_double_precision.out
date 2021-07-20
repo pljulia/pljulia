@@ -3,9 +3,9 @@ RETURNS DOUBLE PRECISION AS $$
     sqrt(x)
 $$ LANGUAGE pljulia;
 SELECT julia_sqrt(5);
- julia_sqrt 
-------------
-   2.236068
+    julia_sqrt    
+------------------
+ 2.23606797749979
 (1 row)
 
 DROP FUNCTION julia_sqrt(x INTEGER);

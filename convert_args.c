@@ -18,17 +18,18 @@ pg_oid_to_jl_value(Oid argtype, const char *value)
 			 */
 			result = jl_box_int64(atoi(value));
 			break;
-
 		case INT8OID:
 			result = jl_box_int64(atoi(value));
 			break;
 
 		case FLOAT4OID:
-			result = jl_box_float32(atof(value));
-			break;
-
 		case FLOAT8OID:
-			result = jl_box_float64(atof(value));
+			;
+			/* don't use atof because we lose precision */
+			double		buf;
+
+			sscanf(value, "%lf", &buf);
+			result = jl_box_float64(buf);
 			break;
 
 		case NUMERICOID:
@@ -37,7 +38,10 @@ pg_oid_to_jl_value(Oid argtype, const char *value)
 			 * numeric can be int, float or selectable precision in pg, so box
 			 * to float64 in julia
 			 */
-			result = jl_box_float64(atof(value));
+			;
+			jl_function_t *parse_func = jl_get_function(jl_main_module, "parse_bigfloat");
+
+			result = jl_call1(parse_func, jl_cstr_to_string(value));
 			break;
 
 		case BOOLOID:

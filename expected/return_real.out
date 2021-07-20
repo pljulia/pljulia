@@ -5,7 +5,7 @@ $$ LANGUAGE pljulia;
 SELECT julia_sqrt(6);
  julia_sqrt 
 ------------
-    2.44949
+  2.4494898
 (1 row)
 
 DROP FUNCTION julia_sqrt(x INTEGER);

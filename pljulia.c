@@ -30,6 +30,12 @@
 #define DOUBLE_LEN 316
 #define LONG_INT_LEN 20
 #define jl_is_dict(ret) (strcmp(jl_typeof_str(ret), "Dict") == 0)
+#define jl_is_bigfloat(ret) (strcmp(jl_typeof_str(ret), "BigFloat") == 0)
+
+#define show_julia_error()             \
+	elog(ERROR, "%s",                  \
+	     jl_string_ptr(jl_eval_string( \
+	         "sprint(showerror, ccall(:jl_exception_occurred, Any, ()))")))
 
 /**********************************************************************
  * The information we cache about loaded procedures.
@@ -203,6 +209,10 @@ pljulia_return_next(jl_value_t *obj)
 	MemoryContextReset(current_call_data->tmp_cxt);
 }
 
+/*
+ * takes a Julia tuple and a TupleDesc as input,
+ * and returns a heaptuple to use in a SRF tuplestore.
+ */
 static HeapTuple
 pljulia_build_tuple_result(jl_value_t *obj, TupleDesc tupdesc)
 {
@@ -294,6 +304,7 @@ _PG_init(void)
 	jl_eval_string("init_nulls_anyarray(dims) = Array{Any}(nothing,dims)");
 	jl_eval_string(
 				   "return_next(arg) = ccall(:pljulia_return_next, Cvoid, (Any,), arg)");
+	jl_eval_string("parse_bigfloat(arg) = parse(BigFloat, arg)");
 }
 
 /*
@@ -338,7 +349,18 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype, bo
 		elog(DEBUG1, "ret (float64): %f", jl_unbox_float64(ret));
 
 		buffer = (char *) palloc0((DOUBLE_LEN + 1) * sizeof(char));
-		snprintf(buffer, DOUBLE_LEN, "%f", ret_unboxed);
+		snprintf(buffer, DOUBLE_LEN, "%.16f", ret_unboxed);
+	}
+	else if (jl_is_bigfloat(ret))
+	{
+		/* this is how we map the numeric types */
+		jl_function_t *str_func = jl_get_function(jl_base_module, "string");
+
+		/*
+		 * get the string representation of bigfloat since there's not a
+		 * function in Julia's C-API for unboxing this type
+		 */
+		buffer = jl_string_ptr(jl_call1(str_func, ret));
 	}
 	else if (jl_typeis(ret, jl_float32_type))
 	{
@@ -874,7 +896,7 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 	/* insert function declaration into Julia */
 	jl_eval_string(compiled_code);
 	if (jl_exception_occurred())
-		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
+		show_julia_error();
 
 	return prodesc;
 }
@@ -916,7 +938,7 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	func = jl_get_function(jl_main_module, prodesc->internal_proname);
 
 	if (jl_exception_occurred())
-		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
+		show_julia_error();
 
 	/*
 	 * insert the function code into the julia interpreter then get a pointer
@@ -928,13 +950,11 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	julia_setup_input_args(fcinfo, procedure_tuple, procedure_struct,
 						   boxed_args, prodesc);
 	if (jl_exception_occurred())
-		elog(ERROR, "%s", jl_typeof_str(jl_exception_occurred()));
+		show_julia_error();
 	ret = jl_call(func, boxed_args, prodesc->nargs);
 
 	if (jl_exception_occurred())
-		elog(ERROR, "%s",
-			 jl_string_ptr(jl_eval_string(
-										  "sprint(showerror, ccall(:jl_exception_occurred, Any, ()))")));
+		show_julia_error();
 
 	/*
 	 * if fn_retisset handle differently... jl_value_t_to_datum only if we

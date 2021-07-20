@@ -3,9 +3,9 @@ RETURNS DECIMAL AS $$
     sqrt(x)
 $$ LANGUAGE pljulia;
 SELECT julia_sqrt(8);
- julia_sqrt 
-------------
-   2.828427
+     julia_sqrt     
+--------------------
+ 2.8284271247461903
 (1 row)
 
 DROP FUNCTION julia_sqrt(x INTEGER);

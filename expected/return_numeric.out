@@ -3,9 +3,9 @@ RETURNS NUMERIC AS $$
     sqrt(x)
 $$ LANGUAGE pljulia;
 SELECT julia_sqrt(2);
- julia_sqrt 
-------------
-   1.414214
+     julia_sqrt     
+--------------------
+ 1.4142135623730951
 (1 row)
 
 DROP FUNCTION julia_sqrt(x INTEGER);
