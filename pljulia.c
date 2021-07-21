@@ -210,7 +210,7 @@ pljulia_return_next(jl_value_t *obj)
 }
 
 /*
- * takes a Julia tuple and a TupleDesc as input,
+ * takes a Julia tuple or dictionary and a TupleDesc as input,
  * and returns a heaptuple to use in a SRF tuplestore.
  */
 static HeapTuple
@@ -224,23 +224,47 @@ pljulia_build_tuple_result(jl_value_t *obj, TupleDesc tupdesc)
 	int			i;
 	jl_value_t *curr_elem;
 
-	nfields = jl_nfields(obj);
-	if (tupdesc->natts != nfields)
-		elog(ERROR, "Tuple number of fields mismatch");
+	if (jl_is_dict(obj))
+	{
+		jl_function_t *dict_nfields;
+
+		dict_nfields = jl_get_function(jl_base_module, "length");
+
+		nfields = jl_unbox_int64(jl_call1(dict_nfields, obj));
+		if (tupdesc->natts != nfields)
+			elog(ERROR, "Dict number of fields mismatch");
+	}
+	else
+	{
+		nfields = jl_nfields(obj);
+		if (tupdesc->natts != nfields)
+			elog(ERROR, "Tuple number of fields mismatch");
+	}
 
 	values = (Datum *) palloc0(sizeof(Datum) * nfields);
 	nulls = (bool *) palloc0(sizeof(bool) * nfields);
 
 	for (i = 0; i < nfields; i++)
 	{
-		curr_elem = jl_get_nth_field(obj, i);
+		att = TupleDescAttr(tupdesc, i);
+		nulls[i] = false;
+
+		if (jl_is_tuple(obj))
+			curr_elem = jl_get_nth_field(obj, i);
+		else
+		{
+			char	   *attname = NameStr(att->attname);
+			jl_value_t *key = jl_cstr_to_string(attname);
+			jl_function_t *dict_get = jl_get_function(jl_main_module, "dict_get");
+
+			curr_elem = jl_call2(dict_get, key, obj);
+		}
+
 		if (jl_typeis(curr_elem, jl_nothing_type))
 		{
 			nulls[i] = true;
 			continue;
 		}
-		nulls[i] = false;
-		att = TupleDescAttr(tupdesc, i);
 
 		values[i] = jl_value_t_to_datum(current_call_data->fcinfo, curr_elem,
 										att->atttypid, false);
@@ -1047,7 +1071,6 @@ pg_composite_from_julia_tuple(FunctionCallInfo fcinfo, jl_value_t *ret,
 	Datum	   *elements;
 	bool	   *nulls = NULL;
 	HeapTuple	tup;
-	Datum		attr;
 	Form_pg_attribute att;
 
 	if (usefcinfo)
@@ -1110,7 +1133,6 @@ pg_composite_from_julia_dict(FunctionCallInfo fcinfo, jl_value_t *ret,
 	Datum	   *elements;
 	bool	   *nulls = NULL;
 	HeapTuple	tup;
-	Datum		attr;
 	char	   *attname;
 	Form_pg_attribute att;
 	jl_function_t *dict_get,
