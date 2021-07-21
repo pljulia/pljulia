@@ -136,6 +136,10 @@ void		_PG_init(void);
 static HeapTuple pljulia_build_tuple_result(jl_value_t *, TupleDesc);
 void		pljulia_return_next(jl_value_t *);
 void		pljulia_elog(jl_value_t *, jl_value_t *);
+jl_value_t *pljulia_spi_exec(jl_value_t *, jl_value_t *);
+jl_value_t *pljulia_spi_query(jl_value_t *);
+jl_value_t *pljulia_spi_fetchrow(jl_value_t *);
+void		pljulia_spi_cursor_close(jl_value_t *);
 
 /* these are taken from pltcl so it would be good to find a way
  * to include them from the source code instead of copying them */
@@ -149,6 +153,149 @@ static inline char *
 utf_e2u(const char *src)
 {
 	return pg_server_to_any(src, strlen(src), PG_UTF8);
+}
+
+jl_value_t *
+pljulia_spi_query(jl_value_t *cmd)
+{
+	char	   *cursor;
+	SPIPlanPtr	plan;
+	Portal		portal;
+
+	char	   *query = jl_string_ptr(cmd);
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "could not connect to SPI manager");
+
+	/* Create a cursor for the query */
+	plan = SPI_prepare(query, 0, NULL);
+	if (plan == NULL)
+		elog(ERROR, "SPI_prepare() failed:%s",
+			 SPI_result_code_string(SPI_result));
+
+	portal = SPI_cursor_open(NULL, plan, NULL, NULL, false);
+	SPI_freeplan(plan);
+	if (portal == NULL)
+		elog(ERROR, "SPI_cursor_open() failed:%s",
+			 SPI_result_code_string(SPI_result));
+	cursor = utf_e2u(portal->name);
+
+	PinPortal(portal);
+
+	/* Commit the inner transaction, return to outer xact context */
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish() failed");
+
+	return jl_cstr_to_string(cursor);
+}
+
+void
+pljulia_spi_cursor_close(jl_value_t *cursor)
+{
+	Portal		p;
+
+	elog(DEBUG1, "inside spi_cursor_close");
+	p = SPI_cursor_find(jl_string_ptr(cursor));
+	if (p)
+	{
+		UnpinPortal(p);
+		SPI_cursor_close(p);
+	}
+}
+
+jl_value_t *
+pljulia_spi_fetchrow(jl_value_t *cursor)
+{
+	elog(DEBUG1, "Inside spi_fetchrow");
+	jl_value_t *row;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "could not connect to SPI manager");
+	Portal		p = SPI_cursor_find(jl_string_ptr(cursor));
+
+	if (!p)
+	{
+		row = jl_nothing;
+	}
+	else
+	{
+		SPI_cursor_fetch(p, true, 1);
+		if (SPI_processed == 0)
+		{
+			UnpinPortal(p);
+			SPI_cursor_close(p);
+			row = jl_nothing;
+		}
+		else
+		{
+			row = pljulia_dict_from_tuple(SPI_tuptable->vals[0],
+										  SPI_tuptable->tupdesc,
+										  true);
+		}
+		SPI_freetuptable(SPI_tuptable);
+	}
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish() failed");
+
+	return row;
+}
+
+/* In case of INSERT, UPDATE, DELETE the returned value is the number of
+ * rows INSERTED, UPDATED or DELETED. In the case of a SELECT statement,
+ * the returned value is a Julia array containing the returned rows
+ * (each row is represented as a dictionary in Julia). This array will be
+ * empty if the SELECT returns no rows.
+ */
+jl_value_t *
+pljulia_spi_exec(jl_value_t *cmd, jl_value_t *lim)
+{
+	char	   *command;
+	int			row_limit;
+	uint64		processed;
+	int			ret;
+	jl_value_t *ret_val;
+
+	command = jl_string_ptr(cmd);
+	row_limit = jl_unbox_int64(lim);
+	/* a null array initially */
+	ret_val = jl_eval_string("[]");
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "could not connect to SPI manager");
+
+	ret = SPI_exec(command, row_limit);
+	/* store the returned rows in a Julia array, if any */
+	if (ret > 0 && SPI_tuptable != NULL)
+	{
+		SPITupleTable *tuptable = SPI_tuptable;
+		TupleDesc	tupdesc = tuptable->tupdesc;
+		uint64		i;
+		jl_value_t *ret;
+		jl_function_t *init_arr = jl_get_function(jl_main_module, "init_nulls_anyarray");
+
+		/* allocate an array to store the results */
+		ret_val = jl_call1(init_arr, jl_box_int64(tuptable->numvals));
+
+		for (i = 0; i < tuptable->numvals; i++)
+		{
+			HeapTuple	tuple;
+
+			tuple = tuptable->vals[i];
+			ret = pljulia_dict_from_tuple(tuple, tupdesc, false);
+			jl_arrayset(ret_val, ret, i);
+		}
+
+	}
+	if (ret == SPI_OK_INSERT || ret == SPI_OK_UPDATE || ret == SPI_OK_DELETE)
+	{
+		/* SPI_processed is a uint64 */
+		ret_val = jl_box_int64(SPI_processed);
+	}
+
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish() failed");
+	return ret_val;
+
 }
 
 void
@@ -289,6 +436,9 @@ pljulia_build_tuple_result(jl_value_t *obj, TupleDesc tupdesc)
 	int			i;
 	jl_value_t *curr_elem;
 
+	if (!obj || jl_is_nothing(obj))
+		elog(ERROR, "Attempting to build tuple from nothing");
+
 	if (jl_is_dict(obj))
 	{
 		jl_function_t *dict_nfields;
@@ -396,7 +546,11 @@ _PG_init(void)
 	jl_eval_string("parse_bigfloat(arg) = parse(BigFloat, arg)");
 	jl_eval_string("elog(level, message) = ccall(:pljulia_elog, Cvoid, "
 				   "(Any,Any), level, message)");
-
+	jl_eval_string("spi_exec(query, limit) = ccall(:pljulia_spi_exec, Any, "
+				   "(Any, Any), query, limit)");
+	jl_eval_string("spi_exec(query) = ccall(:pljulia_spi_query, Any, (Any,), query)");
+	jl_eval_string("spi_fetchrow(cursor) = ccall(:pljulia_spi_fetchrow, Any, (Any,), cursor)");
+	jl_eval_string("spi_cursor_close(cursor) = ccall(:pljulia_spi_cursor_close, Cvoid, (Any,), cursor)");
 }
 
 /*
