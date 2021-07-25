@@ -22,6 +22,9 @@
 #include <utils/fmgroids.h>
 #include <funcapi.h>
 #include <miscadmin.h>
+#include <executor/spi.h>
+#include <commands/trigger.h>
+#include "mb/pg_wchar.h"
 
 #include <sys/time.h>
 #include <julia.h>
@@ -67,10 +70,11 @@ typedef struct pljulia_proc_desc
 typedef struct pljulia_proc_key
 {
 	/*
-	 * just one field for now but define a struct as it will be useful later
-	 * on to add more fields
+	 * is_trigger is in fact a bool, declared as Oid to ensure this struct
+	 * contains no padding
 	 */
 	Oid			fn_oid;
+	Oid			is_trigger;
 } pljulia_proc_key;
 
 /* The procedure hash entry */
@@ -109,7 +113,7 @@ PG_FUNCTION_INFO_V1(pljulia_call_handler);
 
 static Datum cstring_to_type(char *, Oid);
 static Datum jl_value_t_to_datum(FunctionCallInfo, jl_value_t *, Oid, bool);
-pljulia_proc_desc *pljulia_compile(FunctionCallInfo, HeapTuple, Form_pg_proc);
+pljulia_proc_desc *pljulia_compile(FunctionCallInfo, HeapTuple, Form_pg_proc, bool);
 static Datum pljulia_execute(FunctionCallInfo);
 void		julia_setup_input_args(FunctionCallInfo, HeapTuple, Form_pg_proc,
 								   jl_value_t **, pljulia_proc_desc *);
@@ -117,12 +121,30 @@ jl_value_t *convert_arg_to_julia(Datum, Oid, pljulia_proc_desc *, int);
 jl_value_t *julia_array_from_datum(Datum, Oid);
 jl_value_t *julia_dict_from_datum(Datum);
 jl_value_t *pljulia_dict_from_tuple(HeapTuple, TupleDesc, bool);
+
 Datum		pg_array_from_julia_array(FunctionCallInfo, jl_value_t *, Oid);
 Datum		pg_composite_from_julia_tuple(FunctionCallInfo, jl_value_t *, Oid, bool);
 Datum		pg_composite_from_julia_dict(FunctionCallInfo, jl_value_t *, Oid, bool);
+static Datum
+			pljulia_trigger_handler(PG_FUNCTION_ARGS, pljulia_call_data *call_data);
+
 void		_PG_init(void);
 static HeapTuple pljulia_build_tuple_result(jl_value_t *, TupleDesc);
 void		pljulia_return_next(jl_value_t *);
+
+/* these are taken from pltcl so it would be good to find a way
+ * to include them from the source code instead of copying them */
+static inline char *
+utf_u2e(const char *src)
+{
+	return pg_any_to_server(src, strlen(src), PG_UTF8);
+}
+
+static inline char *
+utf_e2u(const char *src)
+{
+	return pg_server_to_any(src, strlen(src), PG_UTF8);
+}
 
 void
 pljulia_return_next(jl_value_t *obj)
@@ -716,7 +738,10 @@ pljulia_call_handler(PG_FUNCTION_ARGS)
 
 	current_call_data = &this_call_data;
 	/* run Julia code */
-	ret = pljulia_execute(fcinfo);
+	if (CALLED_AS_TRIGGER(fcinfo))
+		ret = pljulia_trigger_handler(fcinfo, current_call_data);
+	else
+		ret = pljulia_execute(fcinfo);
 
 	current_call_data = save_call_data;
 
@@ -736,7 +761,7 @@ pljulia_call_handler(PG_FUNCTION_ARGS)
  */
 pljulia_proc_desc *
 pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
-				Form_pg_proc procedure_struct)
+				Form_pg_proc procedure_struct, bool is_trigger)
 {
 	Datum		procedure_source_datum;
 	const char *procedure_code;
@@ -764,6 +789,7 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 
 	/* First try to find the function in the lookup table */
 	proc_key.fn_oid = fcinfo->flinfo->fn_oid;
+	proc_key.is_trigger = is_trigger;
 	hash_entry = hash_search(pljulia_proc_hashtable, &proc_key, HASH_FIND,
 							 &found_hashentry);
 
@@ -811,104 +837,157 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 														 procedure_source_datum));
 	elog(DEBUG1, "procedure code:\n%s", procedure_code);
 
-	/*
-	 * Add the final carriage return to the length of the original procedure.
-	 */
-	compiled_len += strlen(procedure_code) + 1;
-
-	arg_out_func = (FmgrInfo *) palloc0(fcinfo->nargs * sizeof(FmgrInfo));
-
-	proc_cxt = AllocSetContextCreate(TopMemoryContext, "PL/Julia function",
-									 ALLOCSET_SMALL_SIZES);
-
-	get_func_arg_info(procedure_tuple, &argtypes, &argnames, &argmodes);
-
-	elog(DEBUG1, "nargs %d", fcinfo->nargs);
-
-	snprintf(internal_procname, sizeof(internal_procname), "pljulia_%u",
-			 fcinfo->flinfo->fn_oid);
-	/* +1 is for the line break (\n) */
-	compiled_len += strlen("function ") + 1;
-	i = strlen(internal_procname);
-	compiled_len += i;
-	internal_procname[i] = '\0';
-	/* one \n and '(' and ')' */
-	compiled_len += strlen("end") + 3;
-
-	/*
-	 * Loop through the parameters to determine how big of a buffer is needed
-	 * for prepending the parameter names as input arguments to the
-	 * function/procedure code.
-	 */
-	for (i = 0; i < fcinfo->nargs; i++)
+	/* if it's a regular function call */
+	if (!is_trigger)
 	{
-		Oid			argtype = procedure_struct->proargtypes.values[i];
+		/*
+		 * Add the final carriage return to the length of the original
+		 * procedure.
+		 */
+		compiled_len += strlen(procedure_code) + 1;
 
-		type_tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(argtype));
-		if (!HeapTupleIsValid(type_tuple))
-			elog(ERROR, "cache lookup failed for type %u", argtype);
+		arg_out_func = (FmgrInfo *) palloc0(fcinfo->nargs * sizeof(FmgrInfo));
 
-		type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
-		fmgr_info_cxt(type_struct->typoutput, &(arg_out_func[i]), proc_cxt);
-		ReleaseSysCache(type_tuple);
+		proc_cxt = AllocSetContextCreate(TopMemoryContext, "PL/Julia function",
+										 ALLOCSET_SMALL_SIZES);
 
-		value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
+		get_func_arg_info(procedure_tuple, &argtypes, &argnames, &argmodes);
 
-		elog(DEBUG1, "[%d] %s = %s :: %u", i, argnames[i], value, argtypes[i]);
+		elog(DEBUG1, "nargs %d", fcinfo->nargs);
 
-		/* Factor in length of a ',' */
-		compiled_len += strlen(argnames[i]) + 1;
-	}
-	elog(DEBUG1, "compiled_len = %d", compiled_len);
+		snprintf(internal_procname, sizeof(internal_procname), "pljulia_%u",
+				 fcinfo->flinfo->fn_oid);
+		/* +1 is for the line break (\n) */
+		compiled_len += strlen("function ") + 1;
+		i = strlen(internal_procname);
+		compiled_len += i;
+		internal_procname[i] = '\0';
+		/* one \n and '(' and ')' */
+		compiled_len += strlen("end") + 3;
 
-	oldcontext = MemoryContextSwitchTo(proc_cxt);
-	/* stuff that the new prodesc uses must be palloc'd in this context */
-	compiled_code = (char *) palloc0(compiled_len * sizeof(char));
+		/*
+		 * Loop through the parameters to determine how big of a buffer is
+		 * needed for prepending the parameter names as input arguments to the
+		 * function/procedure code.
+		 */
+		for (i = 0; i < fcinfo->nargs; i++)
+		{
+			Oid			argtype = procedure_struct->proargtypes.values[i];
 
-	/*
-	 * Declare the procedure code as a function with the input parameters as
-	 * the function arguments.
-	 */
-	compiled_code[0] = '\0';
-	strcpy(compiled_code, "function ");
-	strcat(compiled_code, internal_procname);
-	/* now the argument names */
-	strcat(compiled_code, "(");
-	for (i = 0; i < fcinfo->nargs; i++)
-	{
-		strcat(compiled_code, argnames[i]);
-		strcat(compiled_code, ",");
-	}
-	/* remove the last ',' if present, close ')' */
-	if (i > 0)
-	{
-		i = strlen(compiled_code) - 1;
-		compiled_code[i] = ')';
+			type_tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(argtype));
+			if (!HeapTupleIsValid(type_tuple))
+				elog(ERROR, "cache lookup failed for type %u", argtype);
+
+			type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
+			fmgr_info_cxt(type_struct->typoutput, &(arg_out_func[i]), proc_cxt);
+			ReleaseSysCache(type_tuple);
+
+			value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
+
+			elog(DEBUG1, "[%d] %s = %s :: %u", i, argnames[i], value, argtypes[i]);
+
+			/* Factor in length of a ',' */
+			compiled_len += strlen(argnames[i]) + 1;
+		}
+		elog(DEBUG1, "compiled_len = %d", compiled_len);
+
+		oldcontext = MemoryContextSwitchTo(proc_cxt);
+		/* stuff that the new prodesc uses must be palloc'd in this context */
+		compiled_code = (char *) palloc0(compiled_len * sizeof(char));
+
+		/*
+		 * Declare the procedure code as a function with the input parameters
+		 * as the function arguments.
+		 */
+		compiled_code[0] = '\0';
+		strcpy(compiled_code, "function ");
+		strcat(compiled_code, internal_procname);
+		/* now the argument names */
+		strcat(compiled_code, "(");
+		for (i = 0; i < fcinfo->nargs; i++)
+		{
+			strcat(compiled_code, argnames[i]);
+			strcat(compiled_code, ",");
+		}
+		/* remove the last ',' if present, close ')' */
+		if (i > 0)
+		{
+			i = strlen(compiled_code) - 1;
+			compiled_code[i] = ')';
+		}
+		else
+			strcat(compiled_code, ")");
+		strcat(compiled_code, procedure_code);
+		strcat(compiled_code, "\nend");
+		elog(DEBUG1, "compiled code (%ld)\n%s", strlen(compiled_code),
+			 compiled_code);
+
+		prodesc = (pljulia_proc_desc *) palloc0(sizeof(pljulia_proc_desc));
+		if (!prodesc)
+			elog(ERROR, "pljulia: out of memory");
+		prodesc->function_body = compiled_code;
+		prodesc->user_proname = pstrdup(NameStr(procedure_struct->proname));
+		prodesc->internal_proname = pstrdup(internal_procname);
+		prodesc->nargs = fcinfo->nargs;
+		prodesc->result_typid = procedure_struct->prorettype;
+		prodesc->fn_retisset = procedure_struct->proretset;
+		prodesc->fn_retistuple = type_is_rowtype(procedure_struct->prorettype);
+		prodesc->mcxt = proc_cxt;
+		prodesc->fn_xmin = HeapTupleHeaderGetRawXmin(procedure_tuple->t_data);
+		/* this is filled later on when handling the input args */
+		prodesc->arg_out_func = (FmgrInfo *) palloc0(prodesc->nargs *
+													 sizeof(FmgrInfo));
+		prodesc->arg_arraytype = (Oid *) palloc0(prodesc->nargs * sizeof(Oid));
+		prodesc->arg_is_rowtype = (bool *) palloc0(prodesc->nargs * sizeof(bool));
+		MemoryContextSwitchTo(oldcontext);
 	}
 	else
-		strcat(compiled_code, ")");
-	strcat(compiled_code, procedure_code);
-	strcat(compiled_code, "\nend");
-	elog(DEBUG1, "compiled code (%ld)\n%s", strlen(compiled_code),
-		 compiled_code);
+		/* if it is a trigger call */
+	{
+		/* the following arguments are standard for trigger calls */
+		char	   *TD_standard_args =
+		"TD_name, TD_relid, TD_table_name, TD_table_schema, TD_event, TD_when, "
+		"TD_level, TD_NEW, TD_OLD, args";
 
-	prodesc = (pljulia_proc_desc *) palloc0(sizeof(pljulia_proc_desc));
-	if (!prodesc)
-		elog(ERROR, "pljulia: out of memory");
-	prodesc->function_body = compiled_code;
-	prodesc->user_proname = pstrdup(NameStr(procedure_struct->proname));
-	prodesc->internal_proname = pstrdup(internal_procname);
-	prodesc->nargs = fcinfo->nargs;
-	prodesc->result_typid = procedure_struct->prorettype;
-	prodesc->fn_retisset = procedure_struct->proretset;
-	prodesc->fn_retistuple = type_is_rowtype(procedure_struct->prorettype);
-	prodesc->mcxt = proc_cxt;
-	prodesc->fn_xmin = HeapTupleHeaderGetRawXmin(procedure_tuple->t_data);
-	/* this is filled later on when handling the input args */
-	prodesc->arg_out_func = (FmgrInfo *) palloc0(prodesc->nargs * sizeof(FmgrInfo));
-	prodesc->arg_arraytype = (Oid *) palloc0(prodesc->nargs * sizeof(Oid));
-	prodesc->arg_is_rowtype = (bool *) palloc0(prodesc->nargs * sizeof(bool));
-	MemoryContextSwitchTo(oldcontext);
+		compiled_len += strlen(procedure_code) + 1;
+		proc_cxt = AllocSetContextCreate(TopMemoryContext, "PL/Julia function",
+										 ALLOCSET_SMALL_SIZES);
+		snprintf(internal_procname, sizeof(internal_procname), "pljulia_%u",
+				 fcinfo->flinfo->fn_oid);
+		/* +1 is for the line break (\n) */
+		compiled_len += strlen("function ") + 1;
+		i = strlen(internal_procname);
+		compiled_len += i;
+		internal_procname[i] = '\0';
+		/* one \n and '(' and ')' */
+		compiled_len += strlen("end") + 3;
+		compiled_len += strlen(TD_standard_args);
+
+		oldcontext = MemoryContextSwitchTo(proc_cxt);
+		compiled_code = (char *) palloc0(compiled_len * sizeof(char));
+
+		compiled_code[0] = '\0';
+		strcpy(compiled_code, "function ");
+		strcat(compiled_code, internal_procname);
+		/* now the argument names */
+		strcat(compiled_code, "(");
+		strcat(compiled_code, TD_standard_args);
+		strcat(compiled_code, ")");
+
+		strcat(compiled_code, procedure_code);
+		strcat(compiled_code, "\nend");
+		elog(DEBUG1, "compiled code (%ld)\n%s", strlen(compiled_code),
+			 compiled_code);
+
+		prodesc = (pljulia_proc_desc *) palloc0(sizeof(pljulia_proc_desc));
+		if (!prodesc)
+			elog(ERROR, "pljulia: out of memory");
+		prodesc->function_body = compiled_code;
+		prodesc->user_proname = pstrdup(NameStr(procedure_struct->proname));
+		prodesc->internal_proname = pstrdup(internal_procname);
+		prodesc->mcxt = proc_cxt;
+		MemoryContextSwitchTo(oldcontext);
+	}
 
 	/* Create a new hashtable entry for the new function definition */
 	hash_entry = hash_search(pljulia_proc_hashtable, &proc_key, HASH_ENTER,
@@ -951,7 +1030,7 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	procedure_struct = (Form_pg_proc) GETSTRUCT(procedure_tuple);
 
 	/* function definition + body code */
-	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct);
+	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct, false);
 	current_call_data->prodesc = prodesc;
 	ReleaseSysCache(procedure_tuple);
 
@@ -1190,4 +1269,216 @@ pg_composite_from_julia_dict(FunctionCallInfo fcinfo, jl_value_t *ret,
 	tup = heap_form_tuple(tupdesc, elements, nulls);
 	ReleaseTupleDesc(tupdesc);
 	return HeapTupleGetDatum(tup);
+}
+
+static Datum
+pljulia_trigger_handler(PG_FUNCTION_ARGS, pljulia_call_data *call_data)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	TupleDesc	tupdesc;
+	HeapTuple	procedure_tuple;
+	Form_pg_proc procedure_struct;
+	volatile HeapTuple rettuple;
+	int			i,
+				rc;
+	pljulia_proc_desc *prodesc;
+	jl_value_t **trig_args;
+	char	   *stroid,
+			   *when,
+			   *level,
+			   *event,
+			   *arg;
+	jl_function_t *func,
+			   *init_arr;
+	jl_value_t *ret;
+
+	/* make sure we're here from a call to a trigger */
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		elog(ERROR, "not called by trigger manager");
+	/* connect to the SPI manager */
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "could not connect to SPI manager");
+	/* make transition tables visible to this SPI connection */
+	rc = SPI_register_trigger_data(trigdata);
+
+	if (rc < 0)
+		elog(ERROR,
+			 "Could not make transition tables visible to PL trigger handler");
+
+	procedure_tuple = SearchSysCache(PROCOID,
+									 ObjectIdGetDatum(fcinfo->flinfo->fn_oid),
+									 0, 0, 0);
+	if (!HeapTupleIsValid(procedure_tuple))
+		elog(ERROR, "cache lookup failed for function %u",
+			 fcinfo->flinfo->fn_oid);
+	procedure_struct = (Form_pg_proc) GETSTRUCT(procedure_tuple);
+
+	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct,
+							  true);
+	call_data->prodesc = prodesc;
+	ReleaseSysCache(procedure_tuple);
+	tupdesc = RelationGetDescr(trigdata->tg_relation);
+	/* setup trigger args, first the standard ones, 10 in total */
+
+	/*
+	 * TD_name, TD_relid, TD_table_name, TD_table_schema, TD_event, TD_when
+	 * TD_level, TD_NEW, TD_OLD, args, where args will be passed as an array
+	 */
+	trig_args = (jl_value_t **) palloc0(10 * sizeof(jl_value_t *));
+	/* set up TD_name with trigger name */
+	trig_args[0] = jl_cstr_to_string(utf_e2u(trigdata->tg_trigger->tgname));
+	/* TD_relid */
+	stroid = DatumGetCString(
+							 DirectFunctionCall1(oidout,
+												 ObjectIdGetDatum(trigdata->tg_relation->rd_id)));
+	trig_args[1] = jl_cstr_to_string(stroid);
+	pfree(stroid);
+
+	/* TD_table_name */
+	stroid = SPI_getrelname(trigdata->tg_relation);
+	trig_args[2] = jl_cstr_to_string(utf_e2u(stroid));
+	pfree(stroid);
+
+	/* TD_table_schema */
+	stroid = SPI_getnspname(trigdata->tg_relation);
+	trig_args[3] = jl_cstr_to_string(utf_e2u(stroid));
+	pfree(stroid);
+
+	/* TD_event */
+	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		event = "INSERT";
+	else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		event = "DELETE";
+	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		event = "UPDATE";
+	else if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
+		event = "TRUNCATE";
+	else
+		elog(ERROR, "unrecognized OPERATION tg_event: %u", trigdata->tg_event);
+
+	trig_args[4] = jl_cstr_to_string(event);
+
+	/* TD_when, can be BEFORE, AFTER, INSTEAD OF */
+	if (TRIGGER_FIRED_BEFORE(trigdata->tg_event))
+		when = "BEFORE";
+	else if (TRIGGER_FIRED_AFTER(trigdata->tg_event))
+		when = "AFTER";
+	else if (TRIGGER_FIRED_INSTEAD(trigdata->tg_event))
+		when = "INSTEAD OF";
+	else
+		elog(ERROR, "unrecognized WHEN tg_event: %u", trigdata->tg_event);
+	trig_args[5] = jl_cstr_to_string(when);
+	/* TD_level */
+	if (TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
+		level = "ROW";
+	else if (TRIGGER_FIRED_FOR_STATEMENT(trigdata->tg_event))
+		level = "STATEMENT";
+	else
+		elog(ERROR, "unrecognized LEVEL tg_event: %u", trigdata->tg_event);
+	trig_args[6] = jl_cstr_to_string(level);
+
+	/* TD_new and TD_old */
+
+	/*
+	 * TD_new and TD_old are initialized NULL (Julia nothing), and depending
+	 * on whether we have a trigger function that modifies rows, we set the
+	 * appropriate values for NEW/OLD rows
+	 */
+
+	/* TD_new */
+	trig_args[7] = jl_nothing;
+	/* TD_OLD */
+	trig_args[8] = jl_nothing;
+
+	rettuple = (HeapTuple) NULL;
+
+	if (TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
+	{
+		/* we only have a new row to return in the case of INSERT */
+		if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		{
+			trig_args[7] = pljulia_dict_from_tuple(trigdata->tg_trigtuple,
+												   tupdesc, !TRIGGER_FIRED_BEFORE(trigdata->tg_event));
+			rettuple = trigdata->tg_trigtuple;
+		}
+
+		/* we only have an old row in the case of DELETE */
+		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		{
+			trig_args[8] = pljulia_dict_from_tuple(trigdata->tg_trigtuple,
+												   tupdesc, true);
+			rettuple = trigdata->tg_trigtuple;
+		}
+
+		/* we have both a new and an old row */
+		else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		{
+			trig_args[7] = pljulia_dict_from_tuple(trigdata->tg_newtuple,
+												   tupdesc, !TRIGGER_FIRED_BEFORE(trigdata->tg_event));
+			trig_args[8] = pljulia_dict_from_tuple(trigdata->tg_trigtuple,
+												   tupdesc, true);
+			rettuple = trigdata->tg_newtuple;
+		}
+	}
+	/* Finally, setup any args to the trigger in an array */
+	init_arr = jl_get_function(jl_main_module, "init_nulls_anyarray");
+	trig_args[9] = jl_call1(init_arr, jl_box_int64(trigdata->tg_trigger->tgnargs));
+
+	/*
+	 * All arguments are passed as strings to the Julia function, and it's up
+	 * to the user to convert to the desired type if needed (for example,
+	 * using parse for numeric input).
+	 */
+	for (i = 0; i < trigdata->tg_trigger->tgnargs; i++)
+	{
+		arg = utf_e2u(trigdata->tg_trigger->tgargs[i]);
+		jl_arrayset(trig_args[9],
+					jl_cstr_to_string(arg), i);
+		pfree(arg);
+	}
+	/* Now call the trigger function */
+	func = jl_get_function(jl_main_module, prodesc->internal_proname);
+
+	ret = jl_call(func, trig_args, 10);
+	if (jl_exception_occurred())
+		show_julia_error();
+
+	/* Disconnect from the SPI_manager */
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish() failed");
+
+	/*
+	 * If function returned nothing or "OK", proceed normally. If function
+	 * returned "SKIP", then suppress the operation for this row. Otherwise,
+	 * for a "MODIFY" operation, the returned value must be a dictionary, with
+	 * rownames as keys and the desired corresponding values.
+	 */
+	if (jl_is_nothing(ret))
+		return PointerGetDatum(rettuple);
+	else if (jl_is_string(ret))
+	{
+		if (strcmp("OK", jl_string_ptr(ret)) == 0)
+			return PointerGetDatum(rettuple);
+		else if (strcmp("SKIP", jl_string_ptr(ret)) == 0)
+		{
+			rettuple = (HeapTuple) NULL;
+			return PointerGetDatum(rettuple);
+		}
+		else
+			elog(ERROR, "Trigger function must return either nothing, \"OK\", "
+				 "\"SKIP\" or a dictionary corresponding to the new tuple");
+	}
+	else if (jl_is_dict(ret))
+	{
+		/* Create the modified tuple to return */
+		rettuple = pljulia_build_tuple_result(ret,
+											  trigdata->tg_relation->rd_att);
+	}
+	else
+		elog(ERROR, "Unexpected return type from trigger function");
+
+	return PointerGetDatum(rettuple);
+
+	elog(ERROR, "PL/Julia does not support triggers yet");
+	PG_RETURN_NULL();
 }
