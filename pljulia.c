@@ -25,6 +25,7 @@
 #include <executor/spi.h>
 #include <commands/trigger.h>
 #include "mb/pg_wchar.h"
+#include <commands/event_trigger.h>
 
 #include <sys/time.h>
 #include <julia.h>
@@ -113,7 +114,7 @@ PG_FUNCTION_INFO_V1(pljulia_call_handler);
 
 static Datum cstring_to_type(char *, Oid);
 static Datum jl_value_t_to_datum(FunctionCallInfo, jl_value_t *, Oid, bool);
-pljulia_proc_desc *pljulia_compile(FunctionCallInfo, HeapTuple, Form_pg_proc, bool);
+pljulia_proc_desc *pljulia_compile(FunctionCallInfo, HeapTuple, Form_pg_proc, bool, bool);
 static Datum pljulia_execute(FunctionCallInfo);
 void		julia_setup_input_args(FunctionCallInfo, HeapTuple, Form_pg_proc,
 								   jl_value_t **, pljulia_proc_desc *);
@@ -125,12 +126,13 @@ jl_value_t *pljulia_dict_from_tuple(HeapTuple, TupleDesc, bool);
 Datum		pg_array_from_julia_array(FunctionCallInfo, jl_value_t *, Oid);
 Datum		pg_composite_from_julia_tuple(FunctionCallInfo, jl_value_t *, Oid, bool);
 Datum		pg_composite_from_julia_dict(FunctionCallInfo, jl_value_t *, Oid, bool);
-static Datum
-			pljulia_trigger_handler(PG_FUNCTION_ARGS, pljulia_call_data *call_data);
+static Datum pljulia_trigger_handler(FunctionCallInfo);
+static void pljulia_event_trigger_handler(FunctionCallInfo);
 
 void		_PG_init(void);
 static HeapTuple pljulia_build_tuple_result(jl_value_t *, TupleDesc);
 void		pljulia_return_next(jl_value_t *);
+void		pljulia_elog(jl_value_t *, jl_value_t *);
 
 /* these are taken from pltcl so it would be good to find a way
  * to include them from the source code instead of copying them */
@@ -230,6 +232,44 @@ pljulia_return_next(jl_value_t *obj)
 	MemoryContextSwitchTo(old_cxt);
 	MemoryContextReset(current_call_data->tmp_cxt);
 }
+
+void
+pljulia_elog(jl_value_t *lvl, jl_value_t *msg)
+{
+	volatile int level;
+	MemoryContext oldcontext;
+	int			priority_idx;
+	int			i;
+
+	static const char *logpriorities[] = {
+		"DEBUG", "LOG", "INFO", "NOTICE",
+		"WARNING", "ERROR", "FATAL", (const char *) NULL
+	};
+
+	static const int loglevels[] = {
+		DEBUG1, LOG, INFO, NOTICE,
+		WARNING, ERROR, FATAL
+	};
+
+	for (i = 0; i < 8; i++)
+	{
+		if (strcmp(logpriorities[i], jl_string_ptr(lvl)) == 0)
+		{
+			priority_idx = i;
+			break;
+		}
+	}
+	if (i >= 7)
+		elog(ERROR, "no match found for elog levels");
+	else
+	{
+		level = loglevels[priority_idx];
+		elog(level, jl_string_ptr(msg));
+	}
+	return;
+}
+
+
 
 /*
  * takes a Julia tuple or dictionary and a TupleDesc as input,
@@ -351,6 +391,9 @@ _PG_init(void)
 	jl_eval_string(
 				   "return_next(arg) = ccall(:pljulia_return_next, Cvoid, (Any,), arg)");
 	jl_eval_string("parse_bigfloat(arg) = parse(BigFloat, arg)");
+	jl_eval_string("elog(level, message) = ccall(:pljulia_elog, Cvoid, "
+				   "(Any,Any), level, message)");
+
 }
 
 /*
@@ -739,7 +782,12 @@ pljulia_call_handler(PG_FUNCTION_ARGS)
 	current_call_data = &this_call_data;
 	/* run Julia code */
 	if (CALLED_AS_TRIGGER(fcinfo))
-		ret = pljulia_trigger_handler(fcinfo, current_call_data);
+		ret = pljulia_trigger_handler(fcinfo);
+	else if (CALLED_AS_EVENT_TRIGGER(fcinfo))
+	{
+		pljulia_event_trigger_handler(fcinfo);
+		ret = (Datum) 0;
+	}
 	else
 		ret = pljulia_execute(fcinfo);
 
@@ -761,7 +809,8 @@ pljulia_call_handler(PG_FUNCTION_ARGS)
  */
 pljulia_proc_desc *
 pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
-				Form_pg_proc procedure_struct, bool is_trigger)
+				Form_pg_proc procedure_struct, bool is_trigger,
+				bool is_event_trigger)
 {
 	Datum		procedure_source_datum;
 	const char *procedure_code;
@@ -838,7 +887,7 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 	elog(DEBUG1, "procedure code:\n%s", procedure_code);
 
 	/* if it's a regular function call */
-	if (!is_trigger)
+	if (!is_trigger && !is_event_trigger)
 	{
 		/*
 		 * Add the final carriage return to the length of the original
@@ -941,8 +990,7 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		prodesc->arg_is_rowtype = (bool *) palloc0(prodesc->nargs * sizeof(bool));
 		MemoryContextSwitchTo(oldcontext);
 	}
-	else
-		/* if it is a trigger call */
+	else if (is_trigger)
 	{
 		/* the following arguments are standard for trigger calls */
 		char	   *TD_standard_args =
@@ -988,7 +1036,50 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		prodesc->mcxt = proc_cxt;
 		MemoryContextSwitchTo(oldcontext);
 	}
+	else if (is_event_trigger)
+	{
+		/* the following arguments are standard for event trigger calls */
+		char	   *TD_standard_args = "TD_event, TD_tag";
 
+		compiled_len += strlen(procedure_code) + 1;
+		proc_cxt = AllocSetContextCreate(TopMemoryContext, "PL/Julia function",
+										 ALLOCSET_SMALL_SIZES);
+		snprintf(internal_procname, sizeof(internal_procname), "pljulia_%u",
+				 fcinfo->flinfo->fn_oid);
+		/* +1 is for the line break (\n) */
+		compiled_len += strlen("function ") + 1;
+		i = strlen(internal_procname);
+		compiled_len += i;
+		internal_procname[i] = '\0';
+		/* one \n and '(' and ')' */
+		compiled_len += strlen("end") + 3;
+		compiled_len += strlen(TD_standard_args);
+
+		oldcontext = MemoryContextSwitchTo(proc_cxt);
+		compiled_code = (char *) palloc0(compiled_len * sizeof(char));
+
+		compiled_code[0] = '\0';
+		strcpy(compiled_code, "function ");
+		strcat(compiled_code, internal_procname);
+		/* now the argument names */
+		strcat(compiled_code, "(");
+		strcat(compiled_code, TD_standard_args);
+		strcat(compiled_code, ")");
+
+		strcat(compiled_code, procedure_code);
+		strcat(compiled_code, "\nend");
+		elog(DEBUG1, "compiled code (%ld)\n%s", strlen(compiled_code),
+			 compiled_code);
+
+		prodesc = (pljulia_proc_desc *) palloc0(sizeof(pljulia_proc_desc));
+		if (!prodesc)
+			elog(ERROR, "pljulia: out of memory");
+		prodesc->function_body = compiled_code;
+		prodesc->user_proname = pstrdup(NameStr(procedure_struct->proname));
+		prodesc->internal_proname = pstrdup(internal_procname);
+		prodesc->mcxt = proc_cxt;
+		MemoryContextSwitchTo(oldcontext);
+	}
 	/* Create a new hashtable entry for the new function definition */
 	hash_entry = hash_search(pljulia_proc_hashtable, &proc_key, HASH_ENTER,
 							 &found_hashentry);
@@ -1030,7 +1121,8 @@ pljulia_execute(FunctionCallInfo fcinfo)
 	procedure_struct = (Form_pg_proc) GETSTRUCT(procedure_tuple);
 
 	/* function definition + body code */
-	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct, false);
+	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct, false,
+							  false);
 	current_call_data->prodesc = prodesc;
 	ReleaseSysCache(procedure_tuple);
 
@@ -1272,7 +1364,7 @@ pg_composite_from_julia_dict(FunctionCallInfo fcinfo, jl_value_t *ret,
 }
 
 static Datum
-pljulia_trigger_handler(PG_FUNCTION_ARGS, pljulia_call_data *call_data)
+pljulia_trigger_handler(PG_FUNCTION_ARGS)
 {
 	TriggerData *trigdata = (TriggerData *) fcinfo->context;
 	TupleDesc	tupdesc;
@@ -1282,7 +1374,7 @@ pljulia_trigger_handler(PG_FUNCTION_ARGS, pljulia_call_data *call_data)
 	int			i,
 				rc;
 	pljulia_proc_desc *prodesc;
-	jl_value_t **trig_args;
+	jl_value_t *trig_args[10];
 	char	   *stroid,
 			   *when,
 			   *level,
@@ -1314,17 +1406,17 @@ pljulia_trigger_handler(PG_FUNCTION_ARGS, pljulia_call_data *call_data)
 	procedure_struct = (Form_pg_proc) GETSTRUCT(procedure_tuple);
 
 	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct,
-							  true);
-	call_data->prodesc = prodesc;
+							  true, false);
+	current_call_data->prodesc = prodesc;
 	ReleaseSysCache(procedure_tuple);
 	tupdesc = RelationGetDescr(trigdata->tg_relation);
-	/* setup trigger args, first the standard ones, 10 in total */
 
 	/*
-	 * TD_name, TD_relid, TD_table_name, TD_table_schema, TD_event, TD_when
-	 * TD_level, TD_NEW, TD_OLD, args, where args will be passed as an array
+	 * setup trigger args, first the standard ones, 10 in total  TD_name,
+	 * TD_relid, TD_table_name, TD_table_schema, TD_event, TD_when TD_level,
+	 * TD_NEW, TD_OLD, args, where args will be passed as an array
 	 */
-	trig_args = (jl_value_t **) palloc0(10 * sizeof(jl_value_t *));
+
 	/* set up TD_name with trigger name */
 	trig_args[0] = jl_cstr_to_string(utf_e2u(trigdata->tg_trigger->tgname));
 	/* TD_relid */
@@ -1473,12 +1565,69 @@ pljulia_trigger_handler(PG_FUNCTION_ARGS, pljulia_call_data *call_data)
 		/* Create the modified tuple to return */
 		rettuple = pljulia_build_tuple_result(ret,
 											  trigdata->tg_relation->rd_att);
+
+		/*
+		 * Still need to check if the operation was an INSERT or UPDATE
+		 * Otherwise, returning a modified row doesn't make sense
+		 */
+		if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event) && !TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		{
+			/* Perhaps another error level ? */
+			elog(NOTICE, "Ignoring modified row, not an INSERT or UPDATE");
+			rettuple = trigdata->tg_trigtuple;
+		}
+
 	}
 	else
-		elog(ERROR, "Unexpected return type from trigger function");
+		elog(ERROR, "Trigger function must return either nothing, \"OK\", "
+			 "\"SKIP\" or a dictionary corresponding to the new tuple");
 
 	return PointerGetDatum(rettuple);
+}
 
-	elog(ERROR, "PL/Julia does not support triggers yet");
-	PG_RETURN_NULL();
+static void
+pljulia_event_trigger_handler(PG_FUNCTION_ARGS)
+{
+	pljulia_proc_desc *prodesc;
+	EventTriggerData *trigdata = (EventTriggerData *) fcinfo->context;
+	int			rc;
+	HeapTuple	procedure_tuple;
+	Form_pg_proc procedure_struct;
+	jl_value_t *trig_args[2];
+	jl_function_t *func;
+
+	/* make sure we're here from a call to an event trigger */
+	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
+		elog(ERROR, "not called by trigger manager");
+	/* connect to the SPI manager */
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "could not connect to SPI manager");
+
+	procedure_tuple = SearchSysCache(PROCOID,
+									 ObjectIdGetDatum(fcinfo->flinfo->fn_oid),
+									 0, 0, 0);
+	if (!HeapTupleIsValid(procedure_tuple))
+		elog(ERROR, "cache lookup failed for function %u",
+			 fcinfo->flinfo->fn_oid);
+	procedure_struct = (Form_pg_proc) GETSTRUCT(procedure_tuple);
+
+	prodesc = pljulia_compile(fcinfo, procedure_tuple, procedure_struct,
+							  false, true);
+	ReleaseSysCache(procedure_tuple);
+
+	/* TD_event */
+	trig_args[0] = jl_cstr_to_string(utf_e2u(trigdata->event));
+	/* TD_tag */
+	trig_args[1] = jl_cstr_to_string(utf_e2u(GetCommandTagName(trigdata->tag)));
+
+	func = jl_get_function(jl_main_module, prodesc->internal_proname);
+	/* the value returned by an event trigger is ignored */
+	jl_call2(func, trig_args[0], trig_args[1]);
+	if (jl_exception_occurred())
+		show_julia_error();
+
+	/* disconnect from the SPI manager */
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish() failed");
+
 }

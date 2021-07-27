@@ -1,9 +1,10 @@
 CREATE FUNCTION trigfunc_modcount() RETURNS trigger AS $$
 if TD_event == "INSERT"
-    TD_NEW["modcnt"] = 0
+    # args[1] == "modcnt"
+    TD_NEW[args[1]] = 0
     return TD_NEW
 elseif TD_event == "UPDATE"
-    TD_NEW["modcnt"] = TD_OLD["modcnt"] + 1
+    TD_NEW[args[1]] = TD_OLD[args[1]] + 1
     return TD_NEW
 else
     return "OK"

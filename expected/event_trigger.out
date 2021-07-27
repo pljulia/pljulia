@@ -1,0 +1,24 @@
+CREATE OR REPLACE FUNCTION jlsnitch() RETURNS event_trigger AS $$
+    elog_msg = "You invoked a command tagged: " * TD_tag * " on event " * TD_event 
+    elog("INFO", elog_msg)
+$$ language pljulia;
+CREATE EVENT TRIGGER julia_a_snitch ON ddl_command_start EXECUTE FUNCTION jlsnitch();
+create event trigger julia_b_snitch on ddl_command_end
+   execute procedure jlsnitch();
+create or replace function foobar() returns int language sql as $$select 1;$$;
+INFO:  You invoked a command tagged: CREATE FUNCTION on event ddl_command_start
+INFO:  You invoked a command tagged: CREATE FUNCTION on event ddl_command_end
+alter function foobar() cost 77;
+INFO:  You invoked a command tagged: ALTER FUNCTION on event ddl_command_start
+INFO:  You invoked a command tagged: ALTER FUNCTION on event ddl_command_end
+drop function foobar();
+INFO:  You invoked a command tagged: DROP FUNCTION on event ddl_command_start
+INFO:  You invoked a command tagged: DROP FUNCTION on event ddl_command_end
+create table foo();
+INFO:  You invoked a command tagged: CREATE TABLE on event ddl_command_start
+INFO:  You invoked a command tagged: CREATE TABLE on event ddl_command_end
+drop table foo;
+INFO:  You invoked a command tagged: DROP TABLE on event ddl_command_start
+INFO:  You invoked a command tagged: DROP TABLE on event ddl_command_end
+drop event trigger julia_a_snitch;
+drop event trigger julia_b_snitch;
