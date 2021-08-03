@@ -26,6 +26,7 @@
 #include <commands/trigger.h>
 #include "mb/pg_wchar.h"
 #include <commands/event_trigger.h>
+#include <utils/guc.h>
 
 #include <sys/time.h>
 #include <julia.h>
@@ -128,6 +129,7 @@ Datum		pg_composite_from_julia_tuple(FunctionCallInfo, jl_value_t *, Oid, bool);
 Datum		pg_composite_from_julia_dict(FunctionCallInfo, jl_value_t *, Oid, bool);
 static Datum pljulia_trigger_handler(FunctionCallInfo);
 static void pljulia_event_trigger_handler(FunctionCallInfo);
+Datum		pljulia_validator(FunctionCallInfo);
 
 void		_PG_init(void);
 static HeapTuple pljulia_build_tuple_result(jl_value_t *, TupleDesc);
@@ -1630,4 +1632,138 @@ pljulia_event_trigger_handler(PG_FUNCTION_ARGS)
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish() failed");
 
+}
+
+PG_FUNCTION_INFO_V1(pljulia_validator);
+
+Datum
+pljulia_validator(PG_FUNCTION_ARGS)
+{
+	Oid			funcoid = PG_GETARG_OID(0);
+	HeapTuple	tuple;
+	Form_pg_proc proc;
+	char	   *code;
+	Datum		prosrc_datum;
+	Oid		   *argtypes;
+	char	  **argnames;
+	char	   *argmodes;
+	bool		isnull;
+	char		functyptype;
+	bool		is_trigger = false,
+				is_event_trigger = false;
+	int			i,
+				nargs;
+	int			compiled_len = 0;
+	char	   *trig_args =
+	"TD_name, TD_relid, TD_table_name, TD_table_schema, TD_event, TD_when, "
+	"TD_level, TD_NEW, TD_OLD, args";
+	char	   *evt_trig_args = "TD_event, TD_tag";
+	char	   *compiled_code;
+
+	/*
+	 * Verify that we have a pljulia function and that the user has access to
+	 * both the language and the function
+	 */
+	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, funcoid))
+		PG_RETURN_VOID();
+	/* the user might not require validation */
+	if (!check_function_bodies)
+	{
+		elog(NOTICE, "check_function_bodies is disabled, skipping validation");
+		PG_RETURN_VOID();
+	}
+
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcoid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", funcoid);
+	proc = (Form_pg_proc) GETSTRUCT(tuple);
+
+	functyptype = get_typtype(proc->prorettype);
+
+	/* Disallow pseudotype result */
+	/* except for TRIGGER, EVTTRIGGER, RECORD, or VOID */
+	if (functyptype == TYPTYPE_PSEUDO)
+	{
+		if (proc->prorettype == TRIGGEROID)
+			is_trigger = true;
+		else if (proc->prorettype == EVTTRIGGEROID)
+			is_event_trigger = true;
+		else if (proc->prorettype != RECORDOID &&
+				 proc->prorettype != VOIDOID)
+			elog(ERROR,
+				 errmsg("PL/Julia functions cannot return type %s",
+						format_type_be(proc->prorettype)));
+	}
+
+	prosrc_datum = SysCacheGetAttr(PROCOID, tuple,
+								   Anum_pg_proc_prosrc, &isnull);
+	code = DatumGetCString(DirectFunctionCall1(textout,
+											   prosrc_datum));
+	nargs = get_func_arg_info(tuple, &argtypes, &argnames, &argmodes);
+
+	/*
+	 * if there's another user function with the name pljulia_validate_func
+	 * this shouldn't cause an error
+	 */
+	compiled_len += strlen("function pljulia_validate_func()\n\nend");
+
+	/*
+	 * simply prepend the arguments to the source code and then call
+	 * jl_eval_string
+	 */
+	if (is_trigger)
+		compiled_len += strlen(trig_args);
+	else if (is_event_trigger)
+		compiled_len += strlen(evt_trig_args);
+	else
+	{
+		for (i = 0; i < nargs; i++)
+		{
+			/* +1 for the ',' */
+			compiled_len += strlen(argnames[i]) + 1;
+		}
+	}
+	compiled_len += strlen(code);
+	compiled_code = (char *) palloc0(compiled_len * sizeof(char));
+	compiled_code[0] = '\0';
+	strcpy(compiled_code, "function pljulia_validate_func");
+	strcat(compiled_code, "(");
+	if (is_trigger)
+	{
+		strcat(compiled_code, trig_args);
+		strcat(compiled_code, ")");
+	}
+	else if (is_event_trigger)
+	{
+		strcat(compiled_code, evt_trig_args);
+		strcat(compiled_code, ")");
+	}
+	else
+	{
+		/* now the argument names */
+		for (i = 0; i < nargs; i++)
+		{
+			strcat(compiled_code, argnames[i]);
+			strcat(compiled_code, ",");
+		}
+		/* remove the last ',' if present, close ')' */
+		if (i > 0)
+		{
+			i = strlen(compiled_code) - 1;
+			compiled_code[i] = ')';
+		}
+		else
+			strcat(compiled_code, ")");
+	}
+
+	strcat(compiled_code, code);
+	strcat(compiled_code, "\nend");
+
+	jl_eval_string(compiled_code);
+	if (jl_exception_occurred())
+		show_julia_error();
+	ReleaseSysCache(tuple);
+
+	/* The validator's result is ignored in any case */
+	PG_RETURN_VOID();
 }
