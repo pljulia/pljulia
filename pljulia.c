@@ -68,6 +68,18 @@ typedef struct pljulia_proc_desc
 	bool		fn_retistuple;	/* true if function returns composite */
 } pljulia_proc_desc;
 
+/* the information we cache about prepared and saved plans */
+typedef struct pljulia_query_desc
+{
+	char		qname[24];
+	MemoryContext plan_cxt;		/* context holding this struct */
+	SPIPlanPtr	plan;
+	int			nargs;
+	Oid		   *argtypes;
+	FmgrInfo   *arginfuncs;
+	Oid		   *argtypioparams;
+}			pljulia_query_desc;
+
 /* The procedure hash key */
 typedef struct pljulia_proc_key
 {
@@ -85,6 +97,13 @@ typedef struct pljulia_hash_entry
 	pljulia_proc_key proc_key;
 	pljulia_proc_desc *prodesc;
 } pljulia_hash_entry;
+
+/* The hash entry for a saved plan */
+typedef struct pljulia_query_entry
+{
+	char		query_name[NAMEDATALEN];
+	pljulia_query_desc *query_desc;
+}			pljulia_query_entry;
 
 /* This struct holds information about a single function call */
 typedef struct pljulia_call_data
@@ -106,6 +125,9 @@ static pljulia_call_data *current_call_data = NULL;
 
 /* The hash table we use to lookup the function in case it already exists */
 static HTAB *pljulia_proc_hashtable = NULL;
+
+/* The hash table we use for saved plans */
+static HTAB *pljulia_query_hashtable = NULL;
 
 MemoryContext TopMemoryContext = NULL;
 
@@ -146,6 +168,9 @@ jl_value_t *pljulia_spi_exec(jl_value_t *, jl_value_t *);
 jl_value_t *pljulia_spi_query(jl_value_t *);
 jl_value_t *pljulia_spi_fetchrow(jl_value_t *);
 void		pljulia_spi_cursor_close(jl_value_t *);
+
+jl_value_t *pljulia_spi_prepare(jl_value_t *, jl_value_t *);
+jl_value_t *pljulia_spi_execplan(jl_value_t *, jl_value_t *, jl_value_t *);
 
 /* these are taken from pltcl so it would be good to find a way
  * to include them from the source code instead of copying them */
@@ -302,6 +327,193 @@ pljulia_spi_exec(jl_value_t *cmd, jl_value_t *lim)
 		elog(ERROR, "SPI_finish() failed");
 	return ret_val;
 
+}
+
+/*
+ * Prepare and save a query. Input arguments are the query,
+ * and a Julia array of parameter types (each type is passed as a string).
+ * If the query accepts no parameters then an empty array should be passed.
+ * Returns the internal name given to the query plan.
+ */
+jl_value_t *
+pljulia_spi_prepare(jl_value_t *cmd, jl_value_t *types_arr)
+{
+	volatile	SPIPlanPtr plan = NULL;
+	volatile MemoryContext plan_cxt = NULL;
+	int			nargs;
+	pljulia_query_desc *qdesc;
+	int			i;
+	pljulia_query_entry *hash_entry;
+
+	MemoryContext oldcontext = CurrentMemoryContext;
+	jl_function_t *len = jl_get_function(jl_base_module, "length");
+	char	   *query = jl_string_ptr(cmd);
+	bool		found_hashentry;
+
+	plan_cxt = AllocSetContextCreate(TopMemoryContext, "PL/Julia spi_prepare query",
+									 ALLOCSET_SMALL_SIZES);
+	MemoryContextSwitchTo(plan_cxt);
+	qdesc = (pljulia_query_desc *) palloc0(sizeof(pljulia_query_desc));
+	snprintf(qdesc->qname, sizeof(qdesc->qname), "%p", qdesc);
+	qdesc->plan_cxt = plan_cxt;
+	nargs = jl_unbox_int64(jl_call1(len, types_arr));
+	qdesc->nargs = nargs;
+	qdesc->argtypes = (Oid *) palloc(nargs * sizeof(Oid));
+	qdesc->arginfuncs = (FmgrInfo *) palloc(nargs * sizeof(FmgrInfo));
+	qdesc->argtypioparams = (Oid *) palloc(nargs * sizeof(Oid));
+	MemoryContextSwitchTo(oldcontext);
+
+	/*
+	 * Resolve argument type names and then look them up by oid in the system
+	 * cache, and remember the required information for input conversion
+	 */
+	for (i = 0; i < nargs; i++)
+	{
+		Oid			typId,
+					typInput,
+					typIOParam;
+		int32		typmod;
+		jl_value_t *curr_argtype;
+
+		curr_argtype = jl_arrayref(types_arr, i);
+		parseTypeString(jl_string_ptr(curr_argtype), &typId, &typmod, false);
+
+		getTypeInputInfo(typId, &typInput, &typIOParam);
+
+		qdesc->argtypes[i] = typId;
+		fmgr_info_cxt(typInput, &(qdesc->arginfuncs[i]), plan_cxt);
+		qdesc->argtypioparams[i] = typIOParam;
+	}
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "could not connect to SPI manager");
+
+	plan = SPI_prepare(utf_u2e(query),
+					   nargs, qdesc->argtypes);
+	if (plan == NULL)
+		elog(ERROR, "SPI_prepare() failed");
+	qdesc->plan = plan;
+	/* Save the plan into permanent memory */
+	if (SPI_keepplan(plan))
+		elog(ERROR, "SPI_keepplan() failed");
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish() failed");
+
+	/* Make a new hashentry for the saved plan */
+	hash_entry = hash_search(pljulia_query_hashtable,
+							 qdesc->qname,
+							 HASH_ENTER, &found_hashentry);
+	hash_entry->query_desc = qdesc;
+
+	return jl_cstr_to_string(qdesc->qname);
+}
+
+
+jl_value_t *
+pljulia_spi_execplan(jl_value_t *plan, jl_value_t *arguments, jl_value_t *lim)
+{
+	int			i;
+	char	   *nulls;
+	int			limit;
+	int			nargs;
+	Datum	   *argvalues;
+	pljulia_query_desc *qdesc;
+	pljulia_query_entry *hash_entry;
+	jl_function_t *len = jl_get_function(jl_base_module, "length");
+	char	   *query;
+	int			spi_rv;
+	jl_value_t *ret_val;
+
+	ret_val = jl_eval_string("[]");
+	nargs = jl_unbox_int64(jl_call1(len, arguments));
+	query = jl_string_ptr(plan);
+	/* The hashtable entry key is a char * for the query hashtable */
+	hash_entry = hash_search(pljulia_query_hashtable, query,
+							 HASH_FIND, NULL);
+	if (hash_entry == NULL)
+		elog(ERROR, "spi_exec_prepared: Invalid prepared query passed");
+
+	qdesc = hash_entry->query_desc;
+	if (qdesc == NULL)
+		elog(ERROR, "spi_exec_prepared: plperl query_hash value vanished");
+
+	if (qdesc->nargs != nargs)
+		elog(ERROR, "spi_exec_prepared: expected %d argument(s), %d passed",
+			 qdesc->nargs, nargs);
+	/* If everything's ok retrieving the plan, set up the arguments */
+	if (nargs > 0)
+	{
+		nulls = (char *) palloc0(nargs * sizeof(char));
+		argvalues = (Datum *) palloc0(nargs * sizeof(Datum));
+	}
+	else
+	{
+		nulls = NULL;
+		argvalues = NULL;
+	}
+
+	for (i = 0; i < nargs; i++)
+	{
+		bool		isnull;
+		jl_value_t *curr_arg = jl_arrayref(arguments, i);
+
+		/* null value? */
+		if (jl_is_nothing(curr_arg))
+		{
+			nulls[i] = 'n';
+			argvalues[i] = InputFunctionCall(&qdesc->arginfuncs[i], NULL,
+											 qdesc->argtypioparams[i], -1);
+		}
+		else
+		{
+			nulls[i] = ' ';
+
+			/*
+			 * and this here is the tricky part..:) how to get the
+			 * argvalues[i]
+			 */
+			argvalues[i] = jl_value_t_to_datum(NULL, curr_arg,
+											   qdesc->argtypes[i], false);
+		}
+	}
+	/* Execute the plan */
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "could not connect to SPI manager");
+
+	limit = 0;
+	if (!jl_is_nothing(lim) && jl_is_int64(lim))
+		limit = jl_unbox_int64(lim);
+	spi_rv = SPI_execp(qdesc->plan, argvalues, nulls, limit);
+
+	if (spi_rv > 0 && SPI_tuptable != NULL)
+	{
+		SPITupleTable *tuptable = SPI_tuptable;
+		TupleDesc	tupdesc = tuptable->tupdesc;
+		uint64		i;
+		jl_value_t *ret;
+		jl_function_t *init_arr = jl_get_function(jl_main_module, "init_nulls_anyarray");
+
+		/* allocate an array to store the results */
+		ret_val = jl_call1(init_arr, jl_box_int64(tuptable->numvals));
+
+		for (i = 0; i < tuptable->numvals; i++)
+		{
+			HeapTuple	tuple;
+
+			tuple = tuptable->vals[i];
+			ret = pljulia_dict_from_tuple(tuple, tupdesc, false);
+			jl_arrayset(ret_val, ret, i);
+		}
+
+	}
+	if (spi_rv == SPI_OK_INSERT || spi_rv == SPI_OK_UPDATE || spi_rv == SPI_OK_DELETE)
+	{
+		/* SPI_processed is a uint64 */
+		ret_val = jl_box_int64(SPI_processed);
+	}
+
+	if (SPI_finish() != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish() failed");
+	return ret_val;
 }
 
 void
@@ -531,6 +743,16 @@ _PG_init(void)
 	 * variable for the main module
 	 */
 	GD = jl_eval_string("GD = Dict()");
+	pljulia_query_hashtable = hash_create("PL/Julia cached plans hashtable",
+										  32, &hash_ctl, HASH_ELEM);
+
+	/*
+	 * Our global data, a dictionary named GD, which holds data we want to be
+	 * shared between functions. This is also used for saved query plans. It's
+	 * initialized to an empty dictionary. This dictionary is a global
+	 * variable for the main module
+	 */
+	GD = jl_eval_string("GD = Dict()");
 
 	char	   *dict_set_command,
 			   *dict_get_command;
@@ -564,7 +786,13 @@ _PG_init(void)
 				   "(Any, Any), query, limit)");
 	jl_eval_string("spi_exec(query) = ccall(:pljulia_spi_query, Any, (Any,), query)");
 	jl_eval_string("spi_fetchrow(cursor) = ccall(:pljulia_spi_fetchrow, Any, (Any,), cursor)");
-	jl_eval_string("spi_cursor_close(cursor) = ccall(:pljulia_spi_cursor_close, Cvoid, (Any,), cursor)");
+	jl_eval_string("spi_cursor_close(cursor) = "
+				   "ccall(:pljulia_spi_cursor_close, Cvoid, (Any,), cursor)");
+	jl_eval_string("spi_prepare(query, argtypes) = ccall(:pljulia_spi_prepare, "
+				   "Any, (Any, Any), query, argtypes)");
+	jl_eval_string(
+				   "spi_exec_prepared(plan, args, limit) = ccall(:pljulia_spi_execplan, "
+				   "Any, (Any, Any, Any), plan, args, limit)");
 }
 
 /*

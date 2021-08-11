@@ -21,7 +21,7 @@ REGRESS = create return_bigint return_char return_decimal \
 		return_double_precision return_integer return_numeric return_real \
 		return_smallint return_text return_varchar in_array_integer in_array_float \
 		in_array_string in_composite return_array return_composite return_set \
-		trigger_test event_trigger do_block exec_query shared
+		trigger_test event_trigger do_block exec_query shared plan
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
