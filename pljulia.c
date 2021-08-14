@@ -109,6 +109,12 @@ static HTAB *pljulia_proc_hashtable = NULL;
 
 MemoryContext TopMemoryContext = NULL;
 
+/*
+ * We won't be using this variable as a cglobal, but we declare it
+ * anyway to keep a reference to it and prevent it from being GC'ed.
+ */
+jl_value_t *GD;
+
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pljulia_call_handler);
@@ -517,6 +523,14 @@ _PG_init(void)
 	pljulia_proc_hashtable =
 		hash_create("PL/Julia cached procedures hashtable", 32, &hash_ctl,
 					HASH_ELEM);
+
+	/*
+	 * Our global data, a dictionary named GD, which holds data we want to be
+	 * shared between functions. This is also used for saved query plans. It's
+	 * initialized to an empty dictionary. This dictionary is a global
+	 * variable for the main module
+	 */
+	GD = jl_eval_string("GD = Dict()");
 
 	char	   *dict_set_command,
 			   *dict_get_command;
