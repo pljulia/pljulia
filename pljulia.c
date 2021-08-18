@@ -714,6 +714,8 @@ _PG_init(void)
 	double		jl_init_time;
 	struct timeval t1,
 				t2;
+	int			i,
+				npackages = 0;
 
 	gettimeofday(&t1, NULL);
 	/* required: setup the Julia context */
@@ -793,6 +795,27 @@ _PG_init(void)
 	jl_eval_string(
 				   "spi_exec_prepared(plan, args, limit) = ccall(:pljulia_spi_execplan, "
 				   "Any, (Any, Any, Any), plan, args, limit)");
+	/* load the installed packages */
+	jl_value_t *packages = jl_eval_string("using Pkg; collect(keys(Pkg.installed()))");
+
+	JL_GC_PUSH1(&packages);
+
+	npackages = jl_array_len(packages);
+	for (i = 0; i < npackages; i++)
+	{
+		char		packname[256];
+		jl_value_t *package;
+		int			j;
+
+		packname[0] = '\0';
+		package = jl_arrayref(packages, i);
+		strcpy(packname, "using ");
+		strcat(packname, jl_string_ptr(package));
+		j = strlen(packname);
+		packname[j] = '\0';
+		jl_eval_string(packname);
+	}
+	JL_GC_POP();
 }
 
 /*
