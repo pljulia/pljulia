@@ -12,11 +12,11 @@ end
 $$ language pljulia;
 
 CREATE TABLE mytab (num integer, description text, modcnt integer);
-INSERT INTO mytab (num, description, modcnt) values (1, 'first', 0), (2, 'second', 0);
 
 CREATE TRIGGER trig_mytab_modcount BEFORE INSERT OR UPDATE ON mytab
     FOR EACH ROW EXECUTE FUNCTION trigfunc_modcount('modcnt');
 
+INSERT INTO mytab (num, description, modcnt) values (1, 'first', 0), (2, 'second', 0), (1, 'first', 1);
 update mytab set description = 'first, modified once' where num = 1;
 INSERT INTO mytab (num, description, modcnt) values (3, 'third', 3);
 

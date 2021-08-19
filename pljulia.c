@@ -800,7 +800,7 @@ pljulia_call_handler(PG_FUNCTION_ARGS)
 	 * terminate. this allows Julia time to cleanup pending write requests and
 	 * run all finalizers
 	 */
-	jl_atexit_hook(0);
+	/* jl_atexit_hook(0); */
 
 	return ret;
 }
@@ -1528,7 +1528,6 @@ pljulia_trigger_handler(PG_FUNCTION_ARGS)
 		arg = utf_e2u(trigdata->tg_trigger->tgargs[i]);
 		jl_arrayset(trig_args[9],
 					jl_cstr_to_string(arg), i);
-		pfree(arg);
 	}
 	/* Now call the trigger function */
 	func = jl_get_function(jl_main_module, prodesc->internal_proname);
