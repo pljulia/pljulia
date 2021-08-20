@@ -282,7 +282,6 @@ pljulia_spi_exec(jl_value_t *cmd, jl_value_t *lim)
 {
 	char	   *command;
 	int			row_limit;
-	uint64		processed;
 	int			ret;
 	jl_value_t *ret_val;
 
@@ -605,7 +604,6 @@ void
 pljulia_elog(jl_value_t *lvl, jl_value_t *msg)
 {
 	volatile int level;
-	MemoryContext oldcontext;
 	int			priority_idx;
 	int			i;
 
@@ -632,7 +630,7 @@ pljulia_elog(jl_value_t *lvl, jl_value_t *msg)
 	else
 	{
 		level = loglevels[priority_idx];
-		elog(level, jl_string_ptr(msg));
+		elog(level, "%s", jl_string_ptr(msg));
 	}
 	return;
 }
@@ -951,7 +949,6 @@ julia_setup_input_args(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 	Oid		   *argtypes;
 	char	  **argnames;
 	char	   *argmodes;
-	char	   *value;
 	int			i;
 	Form_pg_type type_struct;
 	HeapTuple	type_tuple;
@@ -990,7 +987,6 @@ julia_setup_input_args(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		boxed_args[i] = convert_arg_to_julia(fcinfo->args[i].value,
 											 argtypes[i], prodesc, i);
 
-		elog(DEBUG1, "[%d] %s = %s :: %u", i, argnames[i], value, argtypes[i]);
 	}
 }
 
@@ -2030,7 +2026,6 @@ pljulia_event_trigger_handler(PG_FUNCTION_ARGS)
 {
 	pljulia_proc_desc *prodesc;
 	EventTriggerData *trigdata = (EventTriggerData *) fcinfo->context;
-	int			rc;
 	HeapTuple	procedure_tuple;
 	Form_pg_proc procedure_struct;
 	jl_value_t *trig_args[2];
@@ -2129,8 +2124,8 @@ pljulia_validator(PG_FUNCTION_ARGS)
 		else if (proc->prorettype != RECORDOID &&
 				 proc->prorettype != VOIDOID)
 			elog(ERROR,
-				 errmsg("PL/Julia functions cannot return type %s",
-						format_type_be(proc->prorettype)));
+				 "PL/Julia functions cannot return type %s",
+				 format_type_be(proc->prorettype));
 	}
 
 	prosrc_datum = SysCacheGetAttr(PROCOID, tuple,
