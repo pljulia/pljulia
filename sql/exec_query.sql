@@ -49,4 +49,5 @@ SELECT * FROM sometable;
 drop function test_exec_select();
 drop function test_exec_insert();
 drop function test_exec_3rows();
+drop function test_exec_nolim();
 drop table sometable;

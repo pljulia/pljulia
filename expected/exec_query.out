@@ -80,7 +80,5 @@ SELECT * FROM sometable;
 drop function test_exec_select();
 drop function test_exec_insert();
 drop function test_exec_3rows();
+drop function test_exec_nolim();
 drop table sometable;
-ERROR:  cannot drop table sometable because other objects depend on it
-DETAIL:  function test_exec_nolim() depends on type sometable
-HINT:  Use DROP ... CASCADE to drop the dependent objects too.
