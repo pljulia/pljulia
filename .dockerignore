@@ -4,3 +4,6 @@
 *.bc
 
 /results
+
+**/.git
+
