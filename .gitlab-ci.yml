@@ -30,26 +30,26 @@ before_script:
 
 
 # -----------------------------------
-# --------- Julia 1.7beta4 ----------
+# --------- Julia 1.7-rc1 ----------
 # -----------------------------------
 
-pg14beta3-jl1.7beta4:
+pg14beta3-jl1.7rc1:
   extends: .build
   allow_failure: true
   variables:
     BASE_IMAGE_VERSION: 'postgres:14beta3'
     JULIA_MAJOR: '1.7'
-    JULIA_VERSION: '1.7.0-beta4'
-    JULIA_SHA256: '4ae6cbd9378d63bdf75c74c8785068a18926638de4913d32cfab8ef0409f1e6e'
+    JULIA_VERSION: '1.7.0-rc1'
+    JULIA_SHA256: '3c31b79d644eef21811732a1a69bd3d9f23e4b8b19b2856874b02b8fa6a63254'
 
-pg13-jl1.7beta4:
+pg13-jl1.7rc1:
   extends: .build
   allow_failure: true
   variables:
     BASE_IMAGE_VERSION: 'postgres:13'
     JULIA_MAJOR: '1.7'
-    JULIA_VERSION: '1.7.0-beta4'
-    JULIA_SHA256: '4ae6cbd9378d63bdf75c74c8785068a18926638de4913d32cfab8ef0409f1e6e'
+    JULIA_VERSION: '1.7.0-rc1'
+    JULIA_SHA256: '3c31b79d644eef21811732a1a69bd3d9f23e4b8b19b2856874b02b8fa6a63254'
 
 # ------------------------------
 # --------- Julia 1.6 ----------
