@@ -33,11 +33,11 @@ before_script:
 # --------- Julia 1.7-rc1 ----------
 # -----------------------------------
 
-pg14beta3-jl1.7rc1:
+pg14rc1-jl1.7rc1:
   extends: .build
   allow_failure: true
   variables:
-    BASE_IMAGE_VERSION: 'postgres:14beta3'
+    BASE_IMAGE_VERSION: 'postgres:14rc1-bullseye'
     JULIA_MAJOR: '1.7'
     JULIA_VERSION: '1.7.0-rc1'
     JULIA_SHA256: '3c31b79d644eef21811732a1a69bd3d9f23e4b8b19b2856874b02b8fa6a63254'
@@ -46,7 +46,7 @@ pg13-jl1.7rc1:
   extends: .build
   allow_failure: true
   variables:
-    BASE_IMAGE_VERSION: 'postgres:13'
+    BASE_IMAGE_VERSION: 'postgres:13-bullseye'
     JULIA_MAJOR: '1.7'
     JULIA_VERSION: '1.7.0-rc1'
     JULIA_SHA256: '3c31b79d644eef21811732a1a69bd3d9f23e4b8b19b2856874b02b8fa6a63254'
@@ -60,7 +60,7 @@ pg13-jl1.6:
   extends: .build
   allow_failure: false
   variables:
-    BASE_IMAGE_VERSION: 'postgres:13'
+    BASE_IMAGE_VERSION: 'postgres:13-bullseye'
     JULIA_MAJOR: '1.6'
     JULIA_VERSION: '1.6.2'
     JULIA_SHA256: '3eb4b5775b0df1ad38f6c409e989501ab445c95bcb01ab02bd60f5bd1e823240'
@@ -69,7 +69,7 @@ pg12-jl1.6:
   extends: .build
   allow_failure: true
   variables:
-    BASE_IMAGE_VERSION: 'postgres:12'
+    BASE_IMAGE_VERSION: 'postgres:12-bullseye'
     JULIA_MAJOR: '1.6'
     JULIA_VERSION: '1.6.2'
     JULIA_SHA256: '3eb4b5775b0df1ad38f6c409e989501ab445c95bcb01ab02bd60f5bd1e823240'
@@ -78,7 +78,7 @@ pg11-jl1.6:
   extends: .build
   allow_failure: true
   variables:
-    BASE_IMAGE_VERSION: 'postgres:11'
+    BASE_IMAGE_VERSION: 'postgres:11-bullseye'
     JULIA_MAJOR: '1.6'
     JULIA_VERSION: '1.6.2'
     JULIA_SHA256: '3eb4b5775b0df1ad38f6c409e989501ab445c95bcb01ab02bd60f5bd1e823240'
@@ -88,7 +88,7 @@ pg11-jl1.6:
 #   extends: .build
 #   allow_failure: true
 #   variables:
-#     BASE_IMAGE_VERSION: 'postgres:10'
+#     BASE_IMAGE_VERSION: 'postgres:10-bullseye'
 #     JULIA_MAJOR: '1.6'
 #     JULIA_VERSION: '1.6.2'
 #     JULIA_SHA256: '3eb4b5775b0df1ad38f6c409e989501ab445c95bcb01ab02bd60f5bd1e823240'
@@ -97,7 +97,7 @@ pg11-jl1.6:
 #   extends: .build
 #   allow_failure: true
 #   variables:
-#     BASE_IMAGE_VERSION: 'postgres:9.6'
+#     BASE_IMAGE_VERSION: 'postgres:9.6-bullseye'
 #     JULIA_MAJOR: '1.6'
 #     JULIA_VERSION: '1.6.2'
 #     JULIA_SHA256: '3eb4b5775b0df1ad38f6c409e989501ab445c95bcb01ab02bd60f5bd1e823240'
@@ -111,7 +111,7 @@ pg11-jl1.6:
 #   extends: .build
 #   allow_failure: true
 #   variables:
-#     BASE_IMAGE_VERSION: 'postgres:9.6'
+#     BASE_IMAGE_VERSION: 'postgres:9.6-bullseye'
 #     JULIA_MAJOR: '1.0'
 #     JULIA_VERSION: '1.0.5'
 #     JULIA_SHA256: '9dedd613777ba6ebd8aee5796915ff50aa6188ea03ed143cb687fc2aefd76b03'
@@ -120,7 +120,7 @@ pg13-jl1.0:
   extends: .build
   allow_failure: true
   variables:
-    BASE_IMAGE_VERSION: 'postgres:13'
+    BASE_IMAGE_VERSION: 'postgres:13-bullseye'
     JULIA_MAJOR: '1.0'
     JULIA_VERSION: '1.0.5'
     JULIA_SHA256: '9dedd613777ba6ebd8aee5796915ff50aa6188ea03ed143cb687fc2aefd76b03'
