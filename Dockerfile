@@ -28,7 +28,8 @@ ARG BASE_IMAGE_VERSION=postgres:13
 FROM $BASE_IMAGE_VERSION as builder
 
 # add debian mirror - for a faster build
-ARG APT_MIRROR=cdn-fastly.deb.debian.org
+#ARG APT_MIRROR=cdn-fastly.deb.debian.org
+ARG APT_MIRROR=ftp.de.debian.org
 RUN sed -ri "s/(httpredir|deb).debian.org/${APT_MIRROR:-deb.debian.org}/g" /etc/apt/sources.list \
  && sed -ri "s/(security).debian.org/${APT_MIRROR:-security.debian.org}/g" /etc/apt/sources.list \
  && cat /etc/apt/sources.list
