@@ -39,8 +39,8 @@ RUN    apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
+        curl \
         postgresql-server-dev-$PG_MAJOR \
-        wget \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* /tmp/*
 
@@ -63,12 +63,12 @@ ENV LANG=C.UTF-8 \
     JULIA_PATH=/usr/local/julia
 
 RUN set -eux; \
-       mkdir ${JULIA_DIR} \
+    mkdir ${JULIA_DIR} \
     && cd /tmp  \
-    && wget -q https://julialang-s3.julialang.org/bin/linux/x64/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-x86_64.tar.gz \
-    && echo "$JULIA_SHA256 julia-${JULIA_VERSION}-linux-x86_64.tar.gz" | sha256sum -c - \
-    && tar xzf julia-${JULIA_VERSION}-linux-x86_64.tar.gz -C ${JULIA_DIR} --strip-components=1 \
-    && rm /tmp/julia-${JULIA_VERSION}-linux-x86_64.tar.gz \
+    && curl -fL -o julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-x86_64.tar.gz \
+    && echo "$JULIA_SHA256 julia.tar.gz" | sha256sum -c - \
+    && tar xzf julia.tar.gz -C ${JULIA_DIR} --strip-components=1 \
+    && rm /tmp/julia.tar.gz \
     && ln -fs ${JULIA_DIR}/bin/julia /usr/local/bin/julia
 
 # Add julia packages from ENV["PLJULIA_PACKAGES"]
