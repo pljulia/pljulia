@@ -33,11 +33,11 @@ before_script:
 # --------- Julia 1.7-rc1 ----------
 # -----------------------------------
 
-pg14rc1-jl1.7rc1:
+pg14-jl1.7rc1:
   extends: .build
   allow_failure: true
   variables:
-    BASE_IMAGE_VERSION: 'postgres:14rc1-bullseye'
+    BASE_IMAGE_VERSION: 'postgres:14-bullseye'
     JULIA_MAJOR: '1.7'
     JULIA_VERSION: '1.7.0-rc1'
     JULIA_SHA256: '3c31b79d644eef21811732a1a69bd3d9f23e4b8b19b2856874b02b8fa6a63254'

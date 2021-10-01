@@ -20,11 +20,11 @@
 # - postgres:11             : Not working yet
 # - postgres:12             : OK
 # - postgres:13             : OK
-# - postgres:14beta4        : OK
+# - postgres:14             : OK
 # - postgis/postgis:13-3.1  : Should work
 #
 
-ARG BASE_IMAGE_VERSION=postgres:13
+ARG BASE_IMAGE_VERSION=postgres:14
 FROM $BASE_IMAGE_VERSION as builder
 
 # add debian mirror - for a faster build
