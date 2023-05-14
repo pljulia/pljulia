@@ -746,14 +746,6 @@ _PG_init(void)
 	pljulia_query_hashtable = hash_create("PL/Julia cached plans hashtable",
 										  32, &hash_ctl, HASH_ELEM);
 
-	/*
-	 * Our global data, a dictionary named GD, which holds data we want to be
-	 * shared between functions. This is also used for saved query plans. It's
-	 * initialized to an empty dictionary. This dictionary is a global
-	 * variable for the main module
-	 */
-	GD = jl_eval_string("GD = Dict()");
-
 	char	   *dict_set_command,
 			   *dict_get_command;
 
@@ -2119,7 +2111,13 @@ pljulia_validator(PG_FUNCTION_ARGS)
 	{
 		if (proc->prorettype == TRIGGEROID)
 			is_trigger = true;
-		else if (proc->prorettype == EVTTRIGGEROID)
+		else if (proc->prorettype ==
+#if PG_VERSION_NUM >= 140000
+			 EVENT_TRIGGEROID
+#else
+			 EVTTRIGGEROID
+#endif
+			 )
 			is_event_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 				 proc->prorettype != VOIDOID)
