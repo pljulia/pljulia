@@ -4,6 +4,13 @@ PL/Julia is a PostgreSQL extension that allows users to write functions in the J
 This is still a work in progress, so many features are not available in the `main` branch yet, only in the development branches. 
 
 
+## Prerequisites
+------
+- **PostgreSQL** development headers (e.g., `postgresql-server-dev-XX` or built from source)
+- **Julia** must be installed and accessible:
+  - The `julia` binary must be in `PATH`, **or** set the `JULIA` variable when running `make` (e.g., `JULIA=/opt/julia/bin/julia make USE_PGXS=1`)
+
+
 ## Installation
 ------
 To install
@@ -14,8 +21,8 @@ make USE_PGXS=1
 make install USE_PGXS=1
 ```
 
-Or if you're building pljulia in the `contrib` directory of the PostgreSQL source code, 
-run   
+Or if you're building pljulia in the `contrib` directory of the PostgreSQL source code,
+run
 
 ```
 cd pljulia
@@ -376,6 +383,34 @@ $$ language pljulia;
 
 The Julia packages installed for the user are loaded when creating the extension
 
+
+
+## Troubleshooting
+-------
+
+### `make install` requires root privileges
+If your PostgreSQL installation is system-wide, you may need to run `make install` with `sudo`:
+```
+sudo make install USE_PGXS=1
+```
+
+### Julia not found during `sudo make install`
+`sudo` resets the `PATH`, so the `julia` binary may not be found. Pass its location explicitly:
+```
+sudo make install USE_PGXS=1 JULIA=/opt/julia/bin/julia
+```
+
+### PostgreSQL cannot find Julia shared libraries at runtime
+The OS dynamic linker must know where Julia's libraries are. Add them to the linker configuration:
+```bash
+# Adjust the path to your Julia installation
+echo /opt/julia/lib > /etc/ld.so.conf.d/julia.conf
+echo /opt/julia/lib/julia >> /etc/ld.so.conf.d/julia.conf
+sudo ldconfig
+```
+
+### Permission errors at runtime
+Ensure the `postgres` system user has read and execute access to the Julia installation directory.
 
 
 ## Limitations and Future Work

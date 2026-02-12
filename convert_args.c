@@ -80,18 +80,18 @@ pg_oid_to_jl_datatype(Oid argtype)
 			 * let's leave it like this and focus on caching the procedure
 			 * code working with just some input types
 			 */
-			result = jl_int64_type;
+			result = (jl_value_t *) jl_int64_type;
 			break;
 		case INT8OID:
-			result = jl_int64_type;
+			result = (jl_value_t *) jl_int64_type;
 			break;
 
 		case FLOAT4OID:
-			result = jl_float32_type;
+			result = (jl_value_t *) jl_float32_type;
 			break;
 
 		case FLOAT8OID:
-			result = jl_float64_type;
+			result = (jl_value_t *) jl_float64_type;
 			break;
 
 		case NUMERICOID:
@@ -100,19 +100,20 @@ pg_oid_to_jl_datatype(Oid argtype)
 			 * numeric can be int, float or selectable precision in pg, so box
 			 * to float64 in julia
 			 */
-			result = jl_float64_type;
+			result = (jl_value_t *) jl_float64_type;
 			break;
 
 		case BOOLOID:
-			result = jl_bool_type;
+			result = (jl_value_t *) jl_bool_type;
 			break;
 
 		case TEXTOID:
 		case VARCHAROID:
-			result = jl_string_type;
+			result = (jl_value_t *) jl_string_type;
+			break;
 		default:
 			/* return a string representation for everything else */
-			result = jl_string_type;
+			result = (jl_value_t *) jl_string_type;
 			break;
 	}
 	return (jl_value_t *) result;
