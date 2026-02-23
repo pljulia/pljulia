@@ -173,6 +173,15 @@ void		pljulia_spi_cursor_close(jl_value_t *);
 jl_value_t *pljulia_spi_prepare(jl_value_t *, jl_value_t *);
 jl_value_t *pljulia_spi_execplan(jl_value_t *, jl_value_t *, jl_value_t *);
 
+static void
+register_callback(const char *tmpl, void *fn)
+{
+	char	   *cmd = psprintf(tmpl, (unsigned long) (uintptr_t) fn);
+
+	jl_eval_string(cmd);
+	pfree(cmd);
+}
+
 /* these are taken from pltcl so it would be good to find a way
  * to include them from the source code instead of copying them */
 static inline char *
@@ -419,6 +428,7 @@ pljulia_spi_execplan(jl_value_t *plan, jl_value_t *arguments, jl_value_t *lim)
 	pljulia_query_desc *qdesc;
 	pljulia_query_entry *hash_entry;
 	jl_function_t *len = jl_get_function(jl_base_module, "length");
+	jl_function_t *jl_getindex = jl_get_function(jl_base_module, "getindex");
 	const char *query;
 	int			spi_rv;
 	jl_value_t *ret_val;
@@ -454,7 +464,7 @@ pljulia_spi_execplan(jl_value_t *plan, jl_value_t *arguments, jl_value_t *lim)
 	for (i = 0; i < nargs; i++)
 	{
 		bool		isnull;
-		jl_value_t *curr_arg = jl_array_ptr_ref(arguments, i);
+		jl_value_t *curr_arg = jl_call2(jl_getindex, arguments, jl_box_int64(i + 1));
 
 		/* null value? */
 		if (jl_is_nothing(curr_arg))
@@ -770,22 +780,28 @@ _PG_init(void)
 	jl_eval_string(dict_get_command);
 	jl_eval_string(dict_set_command);
 	jl_eval_string("init_nulls_anyarray(dims) = Array{Any}(nothing,dims)");
-	jl_eval_string(
-				   "return_next(arg) = ccall(:pljulia_return_next, Cvoid, (Any,), arg)");
+
+	/*
+	 * Register C callbacks using explicit function pointers rather than
+	 * symbol names.
+	 */
+	register_callback("return_next(arg) = ccall(Ptr{Cvoid}(0x%lx), Cvoid, (Any,), arg)",
+					  pljulia_return_next);
+	register_callback("elog(level, message) = ccall(Ptr{Cvoid}(0x%lx), Cvoid, (Any,Any), level, message)",
+					  pljulia_elog);
+	register_callback("spi_exec(query, limit) = ccall(Ptr{Cvoid}(0x%lx), Any, (Any,Any), query, limit)",
+					  pljulia_spi_exec);
+	register_callback("spi_exec(query) = ccall(Ptr{Cvoid}(0x%lx), Any, (Any,), query)",
+					  pljulia_spi_query);
+	register_callback("spi_fetchrow(cursor) = ccall(Ptr{Cvoid}(0x%lx), Any, (Any,), cursor)",
+					  pljulia_spi_fetchrow);
+	register_callback("spi_cursor_close(cursor) = ccall(Ptr{Cvoid}(0x%lx), Cvoid, (Any,), cursor)",
+					  pljulia_spi_cursor_close);
+	register_callback("spi_prepare(query, argtypes) = ccall(Ptr{Cvoid}(0x%lx), Any, (Any,Any), query, argtypes)",
+					  pljulia_spi_prepare);
+	register_callback("spi_exec_prepared(plan, args, limit) = ccall(Ptr{Cvoid}(0x%lx), Any, (Any,Any,Any), plan, args, limit)",
+					  pljulia_spi_execplan);
 	jl_eval_string("parse_bigfloat(arg) = parse(BigFloat, arg)");
-	jl_eval_string("elog(level, message) = ccall(:pljulia_elog, Cvoid, "
-				   "(Any,Any), level, message)");
-	jl_eval_string("spi_exec(query, limit) = ccall(:pljulia_spi_exec, Any, "
-				   "(Any, Any), query, limit)");
-	jl_eval_string("spi_exec(query) = ccall(:pljulia_spi_query, Any, (Any,), query)");
-	jl_eval_string("spi_fetchrow(cursor) = ccall(:pljulia_spi_fetchrow, Any, (Any,), cursor)");
-	jl_eval_string("spi_cursor_close(cursor) = "
-				   "ccall(:pljulia_spi_cursor_close, Cvoid, (Any,), cursor)");
-	jl_eval_string("spi_prepare(query, argtypes) = ccall(:pljulia_spi_prepare, "
-				   "Any, (Any, Any), query, argtypes)");
-	jl_eval_string(
-				   "spi_exec_prepared(plan, args, limit) = ccall(:pljulia_spi_execplan, "
-				   "Any, (Any, Any, Any), plan, args, limit)");
 	/* load the installed packages */
 	jl_value_t *packages = jl_eval_string("using Pkg; collect(keys(Pkg.installed()))");
 
@@ -1626,6 +1642,12 @@ pg_array_from_julia_array(FunctionCallInfo fcinfo, jl_value_t *ret,
 	int			i;
 	jl_value_t *curr_elem;
 
+	/*
+	 * Use Julia's getindex() to read each element. This correctly handles all
+	 * array storage kinds: boxed pointer arrays, isbits inline arrays
+	 */
+	jl_function_t *jl_getindex = jl_get_function(jl_base_module, "getindex");
+
 	for (i = 0; i < ndim; i++)
 	{
 		dims[i] = jl_array_dim(ret, i);
@@ -1638,7 +1660,7 @@ pg_array_from_julia_array(FunctionCallInfo fcinfo, jl_value_t *ret,
 	for (i = 0; i < len; i++)
 	{
 		row_major_offset = calculate_rm_offset(i, ndim, dims);
-		curr_elem = jl_array_ptr_ref(ret, i);
+		curr_elem = jl_call2(jl_getindex, ret, jl_box_int64(i + 1));
 		/* if jl_nothing then set it as NULL */
 		if (jl_typeis(curr_elem, jl_nothing_type))
 		{
