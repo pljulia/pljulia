@@ -810,17 +810,18 @@ _PG_init(void)
 	npackages = jl_array_len(packages);
 	for (i = 0; i < npackages; i++)
 	{
-		char		packname[256];
 		jl_value_t *package;
-		int			j;
+		const char *pkgname;
+		char	   *packname;
+		size_t		packname_len;
 
-		packname[0] = '\0';
 		package = jl_array_ptr_ref(packages, i);
-		strcpy(packname, "using ");
-		strcat(packname, jl_string_ptr(package));
-		j = strlen(packname);
-		packname[j] = '\0';
+		pkgname = jl_string_ptr(package);
+		packname_len = strlen(pkgname) + 7; /* "using " (6) + name + '\0' */
+		packname = (char *) palloc(packname_len);
+		snprintf(packname, packname_len, "using %s", pkgname);
 		jl_eval_string(packname);
+		pfree(packname);
 	}
 	JL_GC_POP();
 }
