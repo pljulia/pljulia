@@ -1,3 +1,7 @@
+# PL/Julia 
+![PL/Julia CI Pipeline](https://github.com/Bharath-563/pljulia/actions/workflows/ci.yml/badge.svg)
+
+A PostgreSQL extension to write functions in Julia.
 # PL/Julia Procedural Language Handler for PostgreSQL
 
 PL/Julia is a PostgreSQL extension that allows users to write functions in the Julia programming language.  
