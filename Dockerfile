@@ -2,7 +2,7 @@ ARG BASE_IMAGE_VERSION=postgres:14
 FROM $BASE_IMAGE_VERSION AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl postgresql-server-dev-14 patchelf \
+    build-essential ca-certificates curl postgresql-server-dev-$PG_MAJOR patchelf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ARG JULIA_MAJOR=1.10
@@ -10,13 +10,18 @@ ARG JULIA_VERSION=1.10.4
 ENV JULIA_DIR=/usr/local/julia
 
 RUN set -eux; \
+    arch="$(uname -m)" && \
+    case "${arch}" in \
+        x86_64) julia_arch_dir="x64"; julia_arch_pkg="x86_64" ;; \
+        aarch64) julia_arch_dir="aarch64"; julia_arch_pkg="aarch64" ;; \
+        *) echo "Unsupported architecture: ${arch}" >&2; exit 1 ;; \
+    esac && \
     mkdir ${JULIA_DIR} && cd /tmp && \
-    curl -fL -o julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-x86_64.tar.gz && \
+    curl -fL -o julia.tar.gz https://julialang-s3.julialang.org/bin/linux/${julia_arch_dir}/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-${julia_arch_pkg}.tar.gz && \
     tar xzf julia.tar.gz -C ${JULIA_DIR} --strip-components=1 && \
     rm /tmp/julia.tar.gz && \
     ln -fs ${JULIA_DIR}/bin/julia /usr/local/bin/julia && \
     patchelf --clear-execstack /usr/local/julia/lib/julia/libopenlibm.so
-
 ADD . /pljulia
 WORKDIR /pljulia
 

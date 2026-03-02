@@ -1,5 +1,5 @@
 # PL/Julia 
-![PL/Julia CI Pipeline](https://github.com/Bharath-563/pljulia/actions/workflows/ci.yml/badge.svg)
+![PL/Julia CI Pipeline](https://github.com/pljulia/pljulia/actions/workflows/ci.yml/badge.svg)
 
 A PostgreSQL extension to write functions in Julia.
 # PL/Julia Procedural Language Handler for PostgreSQL
