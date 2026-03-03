@@ -4,6 +4,13 @@ PL/Julia is a PostgreSQL extension that allows users to write functions in the J
 This is still a work in progress, so many features are not available in the `main` branch yet, only in the development branches. 
 
 
+## Prerequisites
+------
+- **PostgreSQL** development headers (e.g., `postgresql-server-dev-XX` or built from source)
+- **Julia** must be installed and accessible:
+  - The `julia` binary must be in `PATH`, **or** set the `JULIA` variable when running `make` (e.g., `JULIA=/opt/julia/bin/julia make USE_PGXS=1`)
+
+
 ## Installation
 ------
 To install
@@ -376,6 +383,18 @@ $$ language pljulia;
 
 The Julia packages installed for the user are loaded when creating the extension
 
+
+
+## Troubleshooting
+-------
+
+### PostgreSQL cannot find Julia shared libraries at runtime
+The OS dynamic linker must be able to locate Julia's shared libraries. Refer to the
+[Julia documentation](https://docs.julialang.org/) for platform-specific instructions on
+configuring shared library visibility.
+
+### Permission errors at runtime
+Ensure the `postgres` system user has read and execute access to the Julia installation directory.
 
 
 ## Limitations and Future Work

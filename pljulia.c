@@ -27,6 +27,7 @@
 #include "mb/pg_wchar.h"
 #include <commands/event_trigger.h>
 #include <utils/guc.h>
+#include "parser/parse_type.h"
 
 #include <sys/time.h>
 #include <julia.h>
@@ -193,7 +194,7 @@ pljulia_spi_query(jl_value_t *cmd)
 	SPIPlanPtr	plan;
 	Portal		portal;
 
-	char	   *query = jl_string_ptr(cmd);
+	const char *query = jl_string_ptr(cmd);
 
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "could not connect to SPI manager");
@@ -280,7 +281,7 @@ pljulia_spi_fetchrow(jl_value_t *cursor)
 jl_value_t *
 pljulia_spi_exec(jl_value_t *cmd, jl_value_t *lim)
 {
-	char	   *command;
+	const char *command;
 	int			row_limit;
 	int			ret;
 	jl_value_t *ret_val;
@@ -312,7 +313,7 @@ pljulia_spi_exec(jl_value_t *cmd, jl_value_t *lim)
 
 			tuple = tuptable->vals[i];
 			ret = pljulia_dict_from_tuple(tuple, tupdesc, false);
-			jl_arrayset(ret_val, ret, i);
+			jl_array_ptr_set(ret_val, i, ret);
 		}
 
 	}
@@ -346,7 +347,7 @@ pljulia_spi_prepare(jl_value_t *cmd, jl_value_t *types_arr)
 
 	MemoryContext oldcontext = CurrentMemoryContext;
 	jl_function_t *len = jl_get_function(jl_base_module, "length");
-	char	   *query = jl_string_ptr(cmd);
+	const char *query = jl_string_ptr(cmd);
 	bool		found_hashentry;
 
 	plan_cxt = AllocSetContextCreate(TopMemoryContext, "PL/Julia spi_prepare query",
@@ -374,7 +375,7 @@ pljulia_spi_prepare(jl_value_t *cmd, jl_value_t *types_arr)
 		int32		typmod;
 		jl_value_t *curr_argtype;
 
-		curr_argtype = jl_arrayref(types_arr, i);
+		curr_argtype = jl_array_ptr_ref(types_arr, i);
 		parseTypeString(jl_string_ptr(curr_argtype), &typId, &typmod, false);
 
 		getTypeInputInfo(typId, &typInput, &typIOParam);
@@ -418,7 +419,8 @@ pljulia_spi_execplan(jl_value_t *plan, jl_value_t *arguments, jl_value_t *lim)
 	pljulia_query_desc *qdesc;
 	pljulia_query_entry *hash_entry;
 	jl_function_t *len = jl_get_function(jl_base_module, "length");
-	char	   *query;
+	jl_function_t *jl_getindex = jl_get_function(jl_base_module, "getindex");
+	const char *query;
 	int			spi_rv;
 	jl_value_t *ret_val;
 
@@ -453,7 +455,7 @@ pljulia_spi_execplan(jl_value_t *plan, jl_value_t *arguments, jl_value_t *lim)
 	for (i = 0; i < nargs; i++)
 	{
 		bool		isnull;
-		jl_value_t *curr_arg = jl_arrayref(arguments, i);
+		jl_value_t *curr_arg = jl_call2(jl_getindex, arguments, jl_box_int64(i + 1));
 
 		/* null value? */
 		if (jl_is_nothing(curr_arg))
@@ -500,7 +502,7 @@ pljulia_spi_execplan(jl_value_t *plan, jl_value_t *arguments, jl_value_t *lim)
 
 			tuple = tuptable->vals[i];
 			ret = pljulia_dict_from_tuple(tuple, tupdesc, false);
-			jl_arrayset(ret_val, ret, i);
+			jl_array_ptr_set(ret_val, i, ret);
 		}
 
 	}
@@ -798,7 +800,7 @@ _PG_init(void)
 		int			j;
 
 		packname[0] = '\0';
-		package = jl_arrayref(packages, i);
+		package = jl_array_ptr_ref(packages, i);
 		strcpy(packname, "using ");
 		strcat(packname, jl_string_ptr(package));
 		j = strlen(packname);
@@ -861,7 +863,7 @@ jl_value_t_to_datum(FunctionCallInfo fcinfo, jl_value_t *ret, Oid prorettype, bo
 		 * get the string representation of bigfloat since there's not a
 		 * function in Julia's C-API for unboxing this type
 		 */
-		buffer = jl_string_ptr(jl_call1(str_func, ret));
+		buffer = (char *) jl_string_ptr(jl_call1(str_func, ret));
 	}
 	else if (jl_typeis(ret, jl_float32_type))
 	{
@@ -1148,14 +1150,14 @@ julia_array_from_datum(Datum d, Oid argtype)
 	for (i = 0; i < ndims; i++)
 		types[i] = (jl_value_t *) jl_int64_type;
 
-	tt = jl_apply_tuple_type_v(types, ndims);
+	tt = (jl_tupletype_t *) jl_apply_tuple_type_v(types, ndims);
 
 	for (i = 0; i < ndims; i++)
 		tupvalues[i] = jl_box_int64(dims[i]);
 
 	dimtuple = jl_new_structv(tt, tupvalues, ndims);
 	init_arr = jl_get_function(jl_main_module, "init_nulls_anyarray");
-	jl_arr = jl_call1(init_arr, dimtuple);
+	jl_arr = (jl_array_t *) jl_call1(init_arr, dimtuple);
 
 	for (i = 0; i < nitems; i++)
 	{
@@ -1164,13 +1166,13 @@ julia_array_from_datum(Datum d, Oid argtype)
 		if (nulls[i])
 		{
 			/* already initialized to nothing so this is redundant */
-			jl_arrayset(jl_arr, (jl_value_t *) jl_nothing, j);
+			jl_array_ptr_set(jl_arr, j, (jl_value_t *) jl_nothing);
 			continue;
 		}
 		value = OutputFunctionCall(arg_out_func, elements[i]);
 
 		jl_boxed_elem = pg_oid_to_jl_value(elementtype, value);
-		jl_arrayset(jl_arr, (jl_value_t *) jl_boxed_elem, j);
+		jl_array_ptr_set(jl_arr, j, (jl_value_t *) jl_boxed_elem);
 	}
 	return (jl_value_t *) jl_arr;
 }
@@ -1625,6 +1627,12 @@ pg_array_from_julia_array(FunctionCallInfo fcinfo, jl_value_t *ret,
 	int			i;
 	jl_value_t *curr_elem;
 
+	/*
+	 * Use Julia's getindex() to read each element. This correctly handles all
+	 * array storage kinds: boxed pointer arrays, isbits inline arrays
+	 */
+	jl_function_t *jl_getindex = jl_get_function(jl_base_module, "getindex");
+
 	for (i = 0; i < ndim; i++)
 	{
 		dims[i] = jl_array_dim(ret, i);
@@ -1637,7 +1645,7 @@ pg_array_from_julia_array(FunctionCallInfo fcinfo, jl_value_t *ret,
 	for (i = 0; i < len; i++)
 	{
 		row_major_offset = calculate_rm_offset(i, ndim, dims);
-		curr_elem = jl_arrayref(ret, i);
+		curr_elem = jl_call2(jl_getindex, ret, jl_box_int64(i + 1));
 		/* if jl_nothing then set it as NULL */
 		if (jl_typeis(curr_elem, jl_nothing_type))
 		{
@@ -1953,8 +1961,8 @@ pljulia_trigger_handler(PG_FUNCTION_ARGS)
 	for (i = 0; i < trigdata->tg_trigger->tgnargs; i++)
 	{
 		arg = utf_e2u(trigdata->tg_trigger->tgargs[i]);
-		jl_arrayset(trig_args[9],
-					jl_cstr_to_string(arg), i);
+		jl_array_ptr_set(trig_args[9], i,
+					jl_cstr_to_string(arg));
 	}
 	/* Now call the trigger function */
 	func = jl_get_function(jl_main_module, prodesc->internal_proname);
