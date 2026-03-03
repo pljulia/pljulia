@@ -9,6 +9,7 @@ ARG JULIA_MAJOR=1.10
 ARG JULIA_VERSION=1.10.4
 ENV JULIA_DIR=/usr/local/julia
 
+# Download Julia, verify dynamic SHA256 checksum, and apply execstack fix
 RUN set -eux; \
     arch="$(uname -m)" && \
     case "${arch}" in \
@@ -16,12 +17,20 @@ RUN set -eux; \
         aarch64) julia_arch_dir="aarch64"; julia_arch_pkg="aarch64" ;; \
         *) echo "Unsupported architecture: ${arch}" >&2; exit 1 ;; \
     esac && \
+    julia_tgz="julia-${JULIA_VERSION}-linux-${julia_arch_pkg}.tar.gz" && \
     mkdir ${JULIA_DIR} && cd /tmp && \
-    curl -fL -o julia.tar.gz https://julialang-s3.julialang.org/bin/linux/${julia_arch_dir}/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-${julia_arch_pkg}.tar.gz && \
-    tar xzf julia.tar.gz -C ${JULIA_DIR} --strip-components=1 && \
-    rm /tmp/julia.tar.gz && \
+    curl -fL -o "${julia_tgz}" https://julialang-s3.julialang.org/bin/linux/${julia_arch_dir}/${JULIA_MAJOR}/${julia_tgz} && \
+    curl -fL -o julia.sha256 https://julialang-s3.julialang.org/bin/checksums/julia-${JULIA_VERSION}.sha256 && \
+    grep "${julia_tgz}$" julia.sha256 | sha256sum -c - && \
+    tar xzf "${julia_tgz}" -C ${JULIA_DIR} --strip-components=1 && \
+    rm "/tmp/${julia_tgz}" /tmp/julia.sha256 && \
     ln -fs ${JULIA_DIR}/bin/julia /usr/local/bin/julia && \
     patchelf --clear-execstack /usr/local/julia/lib/julia/libopenlibm.so
+
+# Restore Julia package installations for power users
+RUN set -eux; \
+    julia -e 'using Pkg; Pkg.add("DataFrames"); Pkg.precompile()'
+
 ADD . /pljulia
 WORKDIR /pljulia
 
