@@ -1,0 +1,96 @@
+-- Test SD: per-function private dictionary
+-- Test 1: basic persistence across calls
+CREATE FUNCTION sd_counter() RETURNS int AS $$
+    if !haskey(SD, "n")
+        SD["n"] = 0
+    end
+    SD["n"] += 1
+    return SD["n"]
+$$ LANGUAGE pljulia;
+SELECT sd_counter();
+ sd_counter 
+------------
+          1
+(1 row)
+
+SELECT sd_counter();
+ sd_counter 
+------------
+          2
+(1 row)
+
+SELECT sd_counter();
+ sd_counter 
+------------
+          3
+(1 row)
+
+-- Test 2: SD is private — two functions do not share state
+CREATE FUNCTION sd_func_a() RETURNS text AS $$
+    if !haskey(SD, "who")
+        SD["who"] = "set by func_a"
+    end
+    return SD["who"]
+$$ LANGUAGE pljulia;
+CREATE FUNCTION sd_func_b() RETURNS text AS $$
+    if !haskey(SD, "who")
+        SD["who"] = "set by func_b"
+    end
+    return SD["who"]
+$$ LANGUAGE pljulia;
+SELECT sd_func_a();
+   sd_func_a   
+---------------
+ set by func_a
+(1 row)
+
+SELECT sd_func_b();
+   sd_func_b   
+---------------
+ set by func_b
+(1 row)
+
+SELECT sd_func_a();
+   sd_func_a   
+---------------
+ set by func_a
+(1 row)
+
+-- Test 3: SD resets after CREATE OR REPLACE
+CREATE FUNCTION sd_reset_test() RETURNS int AS $$
+    if !haskey(SD, "n")
+        SD["n"] = 0
+    end
+    SD["n"] += 1
+    return SD["n"]
+$$ LANGUAGE pljulia;
+SELECT sd_reset_test();
+ sd_reset_test 
+---------------
+             1
+(1 row)
+
+SELECT sd_reset_test();
+ sd_reset_test 
+---------------
+             2
+(1 row)
+
+CREATE OR REPLACE FUNCTION sd_reset_test() RETURNS int AS $$
+    if !haskey(SD, "n")
+        SD["n"] = 0
+    end
+    SD["n"] += 1
+    return SD["n"]
+$$ LANGUAGE pljulia;
+SELECT sd_reset_test();
+ sd_reset_test 
+---------------
+             1
+(1 row)
+
+-- Cleanup
+DROP FUNCTION sd_counter();
+DROP FUNCTION sd_func_a();
+DROP FUNCTION sd_func_b();
+DROP FUNCTION sd_reset_test();

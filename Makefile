@@ -23,12 +23,13 @@ PG_CFLAGS += $(shell $(JULIA) $(JL_SHARE)/julia-config.jl --cflags)
 PG_CPPFLAGS += $(shell $(JULIA) $(JL_SHARE)/julia-config.jl --cflags)
 PG_LDFLAGS += $(shell $(JULIA) $(JL_SHARE)/julia-config.jl --ldflags)
 PG_LDFLAGS += $(shell $(JULIA) $(JL_SHARE)/julia-config.jl --ldlibs)
+override CFLAGS_SL_MODULE =
 
 REGRESS = create return_bigint return_char return_decimal \
 		return_double_precision return_integer return_numeric return_real \
 		return_smallint return_text return_varchar in_array_integer in_array_float \
 		in_array_string in_composite return_array return_composite return_set \
-		trigger_test event_trigger do_block exec_query shared plan
+		trigger_test event_trigger do_block exec_query shared plan sd
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
