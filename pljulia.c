@@ -67,6 +67,7 @@ typedef struct pljulia_proc_desc
 	bool	   *arg_is_rowtype; /* is the argument composite? */
 	bool		fn_retisset;	/* true if function returns set (SRF) */
 	bool		fn_retistuple;	/* true if function returns composite */
+	char       *sd_varname;
 } pljulia_proc_desc;
 
 /* the information we cache about prepared and saved plans */
@@ -1418,6 +1419,13 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		prodesc->arg_out_func = (FmgrInfo *) palloc0(prodesc->nargs *
 													 sizeof(FmgrInfo));
 		prodesc->arg_arraytype = (Oid *) palloc0(prodesc->nargs * sizeof(Oid));
+		
+		char sd_cmd[64]; char sd_var[64];
+		snprintf(sd_var, sizeof(sd_var), "pljulia_sd_%u", (unsigned)proc_key.fn_oid);
+		snprintf(sd_cmd, sizeof(sd_cmd), "%s = Dict()", sd_var);
+		jl_eval_string(sd_cmd);
+		prodesc->sd_varname = pstrdup(sd_var);
+	
 		prodesc->arg_is_rowtype = (bool *) palloc0(prodesc->nargs * sizeof(bool));
 		MemoryContextSwitchTo(oldcontext);
 	}
@@ -1465,6 +1473,13 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		prodesc->user_proname = pstrdup(NameStr(procedure_struct->proname));
 		prodesc->internal_proname = pstrdup(internal_procname);
 		prodesc->mcxt = proc_cxt;
+	
+		char sd_cmd[64]; char sd_var[64];
+		snprintf(sd_var, sizeof(sd_var), "pljulia_sd_%u", (unsigned)proc_key.fn_oid);
+		snprintf(sd_cmd, sizeof(sd_cmd), "%s = Dict()", sd_var);
+		jl_eval_string(sd_cmd);
+		prodesc->sd_varname = pstrdup(sd_var);
+	
 		MemoryContextSwitchTo(oldcontext);
 	}
 	else if (is_event_trigger)
@@ -1509,6 +1524,12 @@ pljulia_compile(FunctionCallInfo fcinfo, HeapTuple procedure_tuple,
 		prodesc->user_proname = pstrdup(NameStr(procedure_struct->proname));
 		prodesc->internal_proname = pstrdup(internal_procname);
 		prodesc->mcxt = proc_cxt;
+
+		char sd_cmd[64]; char sd_var[64];
+		snprintf(sd_var, sizeof(sd_var), "pljulia_sd_%u", (unsigned)proc_key.fn_oid);
+		snprintf(sd_cmd, sizeof(sd_cmd), "%s = Dict()", sd_var);
+		jl_eval_string(sd_cmd);
+		prodesc->sd_varname = pstrdup(sd_var);
 		MemoryContextSwitchTo(oldcontext);
 	}
 	/* Create a new hashtable entry for the new function definition */
@@ -1577,6 +1598,11 @@ pljulia_execute(FunctionCallInfo fcinfo)
 						   boxed_args, prodesc);
 	if (jl_exception_occurred())
 		show_julia_error();
+
+	char sd_assign[80];
+	snprintf(sd_assign, sizeof(sd_assign), "SD = %s", prodesc->sd_varname);
+	jl_eval_string(sd_assign);
+
 	ret = jl_call(func, boxed_args, prodesc->nargs);
 
 	if (jl_exception_occurred())
@@ -1967,6 +1993,10 @@ pljulia_trigger_handler(PG_FUNCTION_ARGS)
 	/* Now call the trigger function */
 	func = jl_get_function(jl_main_module, prodesc->internal_proname);
 
+	char sd_assign[80];
+	snprintf(sd_assign, sizeof(sd_assign), "SD = %s", prodesc->sd_varname);
+	jl_eval_string(sd_assign);
+
 	ret = jl_call(func, trig_args, 10);
 	if (jl_exception_occurred())
 		show_julia_error();
@@ -2057,6 +2087,9 @@ pljulia_event_trigger_handler(PG_FUNCTION_ARGS)
 
 	func = jl_get_function(jl_main_module, prodesc->internal_proname);
 	/* the value returned by an event trigger is ignored */
+	char sd_assign[80];
+	snprintf(sd_assign, sizeof(sd_assign), "SD = %s", prodesc->sd_varname);
+	jl_eval_string(sd_assign);
 	jl_call2(func, trig_args[0], trig_args[1]);
 	if (jl_exception_occurred())
 		show_julia_error();
