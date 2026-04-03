@@ -4,8 +4,6 @@ jl_value_t *
 pg_oid_to_jl_value(Oid argtype, const char *value)
 {
 	jl_value_t *result;
-	double		buf;
-	jl_function_t *parse_func;
 
 	switch (argtype)
 	{
@@ -26,7 +24,10 @@ pg_oid_to_jl_value(Oid argtype, const char *value)
 
 		case FLOAT4OID:
 		case FLOAT8OID:
+			;
 			/* don't use atof because we lose precision */
+			double		buf;
+
 			sscanf(value, "%lf", &buf);
 			result = jl_box_float64(buf);
 			break;
@@ -37,7 +38,9 @@ pg_oid_to_jl_value(Oid argtype, const char *value)
 			 * numeric can be int, float or selectable precision in pg, so box
 			 * to float64 in julia
 			 */
-			parse_func = jl_get_function(jl_main_module, "parse_bigfloat");
+			;
+			jl_function_t *parse_func = jl_get_function(jl_main_module, "parse_bigfloat");
+
 			result = jl_call1(parse_func, jl_cstr_to_string(value));
 			break;
 
@@ -69,6 +72,13 @@ pg_oid_to_jl_datatype(Oid argtype)
 	switch (argtype)
 	{
 		case INT2OID:
+		case DATEOID:
+			result = jl_eval_string("Dates.Date");
+			break;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			result = jl_eval_string("Dates.DateTime");
+			break;
 		case INT4OID:
 
 			/*
@@ -124,7 +134,7 @@ pg_oid_to_jl_datatype(Oid argtype)
 int
 calculate_cm_offset(int index_rm, int ndims, int *dims)
 {
-	int        *indices = (int *) palloc0(sizeof(int) * ndims);
+	int		   *indices = (int *) palloc0(sizeof(int) * ndims);
 	int			offset = index_rm;
 	int			col_major_offset = 0;
 	int			i;
@@ -157,27 +167,27 @@ calculate_cm_offset(int index_rm, int ndims, int *dims)
 int
 calculate_rm_offset(int index_cm, int ndims, int *dims)
 {
-	int			*indices = (int *) palloc0(sizeof(int) * ndims);
+	int		   *indices = (int *) palloc0(sizeof(int) * ndims);
 	int			offset = index_cm;
 	int			row_major_offset = 0;
-	int			i;
 
 	/*
 	 * Get the indices (n1, n2, ... , nd) from the offset. Since the array is
 	 * stored in column-major order, the formula that calculates the offset
 	 * from the indices is n1 + (N1 * (n2 + N2 * (n3 + N3 * (...))))
 	 */
-	for (i = 0; i < ndims; i++)
+	for (int i = 0; i < ndims; i++)
 	{
 		indices[i] = offset % dims[i];
 		offset = offset / dims[i];
 	}
 
 	/* Now calculate the offset for the row-major representation */
-	for (i = 0; i < ndims; i++)
+	for (int i = 0; i < ndims; i++)
 	{
 		row_major_offset = row_major_offset * dims[i] + indices[i];
 	}
 	pfree(indices);
 	return row_major_offset;
 }
+

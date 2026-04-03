@@ -2206,3 +2206,4 @@ pljulia_validator(PG_FUNCTION_ARGS)
 	/* The validator's result is ignored in any case */
 	PG_RETURN_VOID();
 }
+
