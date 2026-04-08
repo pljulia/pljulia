@@ -164,7 +164,7 @@ Datum		pljulia_validator(FunctionCallInfo);
 void		_PG_init(void);
 static HeapTuple pljulia_build_tuple_result(jl_value_t *, TupleDesc);
 void		pljulia_return_next(jl_value_t *);
-void		pljulia_elog(jl_value_t *, jl_value_t *);
+extern PGDLLEXPORT void pljulia_elog(jl_value_t *lvl, jl_value_t *msg);
 jl_value_t *pljulia_spi_exec(jl_value_t *, jl_value_t *);
 jl_value_t *pljulia_spi_query(jl_value_t *);
 jl_value_t *pljulia_spi_fetchrow(jl_value_t *);
