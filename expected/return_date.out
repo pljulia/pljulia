@@ -1,0 +1,7 @@
+CREATE FUNCTION
+SELECT test_date();
+ test_date  
+------------
+ 2026-04-15
+(1 row)
+

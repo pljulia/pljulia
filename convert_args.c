@@ -71,6 +71,9 @@ pg_oid_to_jl_datatype(Oid argtype)
 
 	switch (argtype)
 	{
+		case DATEOID:
+			result = jl_eval_string("Dates.Date");
+			break;
 		case INT2OID:
 		case INT4OID:
 
