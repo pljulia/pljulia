@@ -1,0 +1,7 @@
+CREATE FUNCTION
+SELECT test_timestamp();
+   test_timestamp    
+---------------------
+ 2026-04-15 12:30:45
+(1 row)
+
