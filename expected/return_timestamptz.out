@@ -1,0 +1,8 @@
+SET TimeZone = 'UTC';
+CREATE FUNCTION
+SELECT test_timestamptz();
+    test_timestamptz    
+------------------------
+ 2026-04-15 12:30:45+00
+(1 row)
+
