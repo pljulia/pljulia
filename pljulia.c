@@ -29,6 +29,7 @@
 #include <utils/guc.h>
 #include "parser/parse_type.h"
 
+#include <limits.h>
 #include <sys/time.h>
 #include <julia.h>
 #include "convert_args.h"
@@ -795,16 +796,16 @@ _PG_init(void)
 	npackages = jl_array_len(packages);
 	for (i = 0; i < npackages; i++)
 	{
-		char		packname[256];
+		/*
+		 * Julia package name could theoretically be the filename max minus the
+		 * extension.  But keep it simple and just account for the Julia
+		 * "using" keyword when loading packages.
+		 */
+		char		packname[NAME_MAX + 7];
 		jl_value_t *package;
-		int			j;
 
-		packname[0] = '\0';
 		package = jl_array_ptr_ref(packages, i);
-		strcpy(packname, "using ");
-		strcat(packname, jl_string_ptr(package));
-		j = strlen(packname);
-		packname[j] = '\0';
+		snprintf(packname, sizeof(packname), "using %s", jl_string_ptr(package));
 		jl_eval_string(packname);
 	}
 	JL_GC_POP();
