@@ -10,8 +10,6 @@
 # ---------------------------------
 # BASE_IMAGE_VERSION = Base Docker images:
 #   Valid values:  `postgres` and `postgis/postgis` debian versions
-#   postgres: https://hub.docker.com/_/postgres?tab=tags&page=1&ordering=last_updated&name=buster  (debian based!)
-#   postgis:  https://registry.hub.docker.com/r/postgis/postgis/tags?page=1&ordering=last_updated
 #
 # BASE_IMAGE_VERSION - Status:
 # - postgres:12             : OK
@@ -19,17 +17,9 @@
 # - postgres:14             : OK
 # - postgres:15             : OK
 # - postgis/postgis:13-3.1  : Should work
-#
 
 ARG BASE_IMAGE_VERSION=postgres:15
-FROM $BASE_IMAGE_VERSION as builder
-
-# add debian mirror - for a faster build
-#ARG APT_MIRROR=cdn-fastly.deb.debian.org
-ARG APT_MIRROR=ftp.de.debian.org
-RUN sed -ri "s/(httpredir|deb).debian.org/${APT_MIRROR:-deb.debian.org}/g" /etc/apt/sources.list \
- && sed -ri "s/(security).debian.org/${APT_MIRROR:-security.debian.org}/g" /etc/apt/sources.list \
- && cat /etc/apt/sources.list
+FROM $BASE_IMAGE_VERSION AS builder
 
 # Install build dependencies
 RUN    apt-get update \
@@ -78,7 +68,6 @@ RUN set -eux; \
     ln -fs ${JULIA_DIR}/bin/julia /usr/local/bin/julia
 
 # Add julia packages from ENV["PLJULIA_PACKAGES"]
-# - this is a comma separated package name lists
 RUN set -eux; \
     if [ ! -z "$PLJULIA_PACKAGES" ]; then \
       echo "install: ${PLJULIA_PACKAGES}"; \
