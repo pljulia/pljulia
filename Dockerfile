@@ -53,11 +53,15 @@ ENV LANG=C.UTF-8 \
     JULIA_PATH=/usr/local/julia
 
 RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "${arch}" in \
+        x86_64) julia_arch_dir="x64" ;; \
+    esac; \
     mkdir ${JULIA_DIR} \
     && cd /tmp  \
     && curl -fL -o julia_hashes.txt "https://julialang-s3.julialang.org/bin/checksums/julia-${JULIA_VERSION}.sha256" \
-    && JULIA_SHA256=$(grep "julia-${JULIA_VERSION}-linux-x86_64.tar.gz" julia_hashes.txt | cut -d' ' -f1) \
-    && curl -fL -o julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-x86_64.tar.gz \
+    && JULIA_SHA256=$(grep "julia-${JULIA_VERSION}-linux-${arch}.tar.gz" julia_hashes.txt | cut -d' ' -f1) \
+    && curl -fL -o julia.tar.gz https://julialang-s3.julialang.org/bin/linux/${julia_arch_dir}/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-${arch}.tar.gz \
     && echo "$JULIA_SHA256 julia.tar.gz" | sha256sum -c - \
     && tar xzf julia.tar.gz -C ${JULIA_DIR} --strip-components=1 \
     && rm /tmp/julia.tar.gz \
