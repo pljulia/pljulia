@@ -4,7 +4,6 @@
 #   BASE_IMAGE_VERSION=postgres:13
 #   JULIA_MAJOR=1.6
 #   JULIA_VERSION=1.6.1
-#   JULIA_SHA256=7c888adec3ea42afbfed2ce756ce1164a570d50fa7506c3f2e1e2cbc49d52506
 #   PLJULIA_REGRESSION=YES
 #   PLJULIA_PACKAGES="CpuId,Primes"
 #
@@ -27,13 +26,6 @@
 ARG BASE_IMAGE_VERSION=postgres:14
 FROM $BASE_IMAGE_VERSION as builder
 
-# add debian mirror - for a faster build
-#ARG APT_MIRROR=cdn-fastly.deb.debian.org
-ARG APT_MIRROR=ftp.de.debian.org
-RUN sed -ri "s/(httpredir|deb).debian.org/${APT_MIRROR:-deb.debian.org}/g" /etc/apt/sources.list \
- && sed -ri "s/(security).debian.org/${APT_MIRROR:-security.debian.org}/g" /etc/apt/sources.list \
- && cat /etc/apt/sources.list
-
 # Install build dependencies
 RUN    apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -47,7 +39,6 @@ RUN    apt-get update \
 # Julia Versions:
 ARG JULIA_MAJOR=1.6
 ARG JULIA_VERSION=1.6.3
-ARG JULIA_SHA256=c7459c334cd7c3e4a297baf52535937c6bad640e60882f9201a73bab9394314b
 ARG PLJULIA_PACKAGES="CpuId,Primes"
 
 # Install Julia
@@ -56,7 +47,6 @@ ENV LANG=C.UTF-8 \
     \
     JULIA_MAJOR=$JULIA_MAJOR \
     JULIA_VERSION=$JULIA_VERSION \
-    JULIA_SHA256=$JULIA_SHA256 \
     PLJULIA_PACKAGES=$PLJULIA_PACKAGES \
     \
     JULIA_DIR=/usr/local/julia \
@@ -65,6 +55,8 @@ ENV LANG=C.UTF-8 \
 RUN set -eux; \
     mkdir ${JULIA_DIR} \
     && cd /tmp  \
+    && curl -fL -o julia_hashes.txt "https://julialang-s3.julialang.org/bin/checksums/julia-${JULIA_VERSION}.sha256" \
+    && JULIA_SHA256=$(grep "julia-${JULIA_VERSION}-linux-x86_64.tar.gz" julia_hashes.txt | cut -d' ' -f1) \
     && curl -fL -o julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/${JULIA_MAJOR}/julia-${JULIA_VERSION}-linux-x86_64.tar.gz \
     && echo "$JULIA_SHA256 julia.tar.gz" | sha256sum -c - \
     && tar xzf julia.tar.gz -C ${JULIA_DIR} --strip-components=1 \
