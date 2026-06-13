@@ -20,7 +20,6 @@
 #include <utils/typcache.h>
 #include <utils/rel.h>
 #include <utils/fmgroids.h>
-#include <funcapi.h>
 #include <miscadmin.h>
 #include <executor/spi.h>
 #include <commands/trigger.h>
