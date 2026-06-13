@@ -24,7 +24,7 @@ before_script:
         --build-arg JULIA_VERSION=$JULIA_VERSION \
         --build-arg PLJULIA_REGRESSION=YES \
         -t pljulia .
-    - docker images pljuliat
+    - docker images pljulia
     - docker images $BASE_IMAGE_VERSION
 
 # ---------------------------------
