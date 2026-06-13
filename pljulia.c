@@ -134,10 +134,10 @@ static HTAB *pljulia_query_hashtable = NULL;
 MemoryContext TopMemoryContext = NULL;
 
 /*
- * We won't be using this variable as a cglobal, but we declare it
+ * We won't be using this variable as a C global, but we declare it
  * anyway to keep a reference to it and prevent it from being GC'ed.
  */
-jl_value_t *GD;
+static jl_value_t *GD;
 
 PG_MODULE_MAGIC;
 
