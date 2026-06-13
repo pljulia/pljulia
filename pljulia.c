@@ -455,7 +455,6 @@ pljulia_spi_execplan(jl_value_t *plan, jl_value_t *arguments, jl_value_t *lim)
 
 	for (i = 0; i < nargs; i++)
 	{
-		bool		isnull;
 		jl_value_t *curr_arg = jl_call2(jl_getindex, arguments, jl_box_int64(i + 1));
 
 		/* null value? */
@@ -1097,13 +1096,10 @@ jl_value_t *
 julia_array_from_datum(Datum d, Oid argtype)
 {
 	ArrayType  *ar;
-	Oid			elementtype,
-				typioparam,
-				typoutputfunc;
+	Oid			elementtype;
 	int16		typlen;
 	bool		typbyval;
-	char		typalign,
-				typdelim;
+	char		typalign;
 	int			i,
 				j,
 				nitems,
