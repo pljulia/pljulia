@@ -789,7 +789,8 @@ _PG_init(void)
 				   "spi_exec_prepared(plan, args, limit) = ccall(:pljulia_spi_execplan, "
 				   "Any, (Any, Any, Any), plan, args, limit)");
 	/* load the installed packages */
-	jl_value_t *packages = jl_eval_string("using Pkg; collect(keys(Pkg.installed()))");
+	jl_value_t *packages = jl_eval_string(
+			"using Pkg; collect(p.name for p in values(Pkg.dependencies()) if p.is_direct_dep)");
 
 	JL_GC_PUSH1(&packages);
 
